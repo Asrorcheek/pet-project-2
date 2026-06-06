@@ -10,6 +10,7 @@ const hermesApiBase = normalizeBaseUrl(process.env.HERMES_API_BASE || DEFAULT_HE
 const hermesApiKey = process.env.HERMES_API_KEY;
 const hermesModel = process.env.HERMES_MODEL || 'hermes-agent';
 const hermesInstructions = process.env.HERMES_INSTRUCTIONS || 'Answer clearly and concisely.';
+const hermesTimeoutMs = parsePositiveInt(process.env.HERMES_TIMEOUT_MS, 180000);
 const allowedUserIds = parseAllowedUserIds(process.env.ALLOWED_TELEGRAM_USER_IDS);
 
 if (!token || token === 'sizning_bot_tokeningiz') {
@@ -68,13 +69,24 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  const typingInterval = setInterval(() => {
+    bot.sendChatAction(msg.chat.id, 'typing').catch((error) => {
+      console.error('Telegram typing action failed:', error.message);
+    });
+  }, 5000);
+
   try {
     await bot.sendChatAction(msg.chat.id, 'typing');
     const answer = await askHermes(msg.text, msg.chat.id);
     await sendLongMessage(msg.chat.id, answer || 'Hermes javob qaytarmadi.');
   } catch (error) {
     console.error('Hermes request failed:', error);
-    await bot.sendMessage(msg.chat.id, 'Hermes Agent bilan ulanishda xatolik yuz berdi.');
+    const errorMessage = error.name === 'AbortError'
+      ? 'Hermes Agent javob berishda juda sekin. Keyinroq qayta urinib ko`ring.'
+      : 'Hermes Agent bilan ulanishda xatolik yuz berdi.';
+    await bot.sendMessage(msg.chat.id, errorMessage);
+  } finally {
+    clearInterval(typingInterval);
   }
 });
 
@@ -97,8 +109,12 @@ function denyAccess(chatId) {
 }
 
 async function askHermes(text, chatId) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), hermesTimeoutMs);
+
   const response = await fetch(`${hermesApiBase}/responses`, {
     method: 'POST',
+    signal: controller.signal,
     headers: {
       Authorization: `Bearer ${hermesApiKey}`,
       'Content-Type': 'application/json',
@@ -110,7 +126,7 @@ async function askHermes(text, chatId) {
       conversation: `telegram-${chatId}`,
       store: true,
     }),
-  });
+  }).finally(() => clearTimeout(timeout));
 
   const bodyText = await response.text();
 
@@ -193,4 +209,9 @@ function parseAllowedUserIds(value) {
 
 function normalizeBaseUrl(value) {
   return value.replace(/\/+$/, '');
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

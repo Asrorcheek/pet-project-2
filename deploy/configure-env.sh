@@ -38,8 +38,9 @@ set_env "$HERMES_ENV" API_SERVER_KEY "$key"
 set_env "$BOT_ENV" HERMES_API_BASE http://127.0.0.1:8642/v1
 set_env "$BOT_ENV" HERMES_API_KEY "$key"
 set_env "$BOT_ENV" HERMES_MODEL hermes-agent
+set_env "$BOT_ENV" HERMES_TIMEOUT_MS 180000
 
 chmod 600 "$BOT_ENV" "$HERMES_ENV"
 
 echo "Environment configured."
-grep -hE '^(TELEGRAM_BOT_TOKEN|HERMES_API_BASE|HERMES_API_KEY|HERMES_MODEL|API_SERVER_)' "$BOT_ENV" "$HERMES_ENV" | sed -E 's/=.*/=<set>/'
+grep -hE '^(TELEGRAM_BOT_TOKEN|HERMES_API_BASE|HERMES_API_KEY|HERMES_MODEL|HERMES_TIMEOUT_MS|API_SERVER_)' "$BOT_ENV" "$HERMES_ENV" | sed -E 's/=.*/=<set>/'

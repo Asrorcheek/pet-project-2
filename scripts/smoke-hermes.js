@@ -1,11 +1,12 @@
 require('dotenv').config();
 
 const DEFAULT_HERMES_API_BASE = 'http://127.0.0.1:8642/v1';
-const TIMEOUT_MS = 180000;
+const DEFAULT_TIMEOUT_MS = 180000;
 
 const hermesApiBase = (process.env.HERMES_API_BASE || DEFAULT_HERMES_API_BASE).replace(/\/+$/, '');
 const hermesApiKey = process.env.HERMES_API_KEY;
 const hermesModel = process.env.HERMES_MODEL || 'hermes-agent';
+const hermesTimeoutMs = parsePositiveInt(process.env.HERMES_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
 
 if (!hermesApiKey) {
   console.error('HERMES_API_KEY is not set.');
@@ -13,7 +14,7 @@ if (!hermesApiKey) {
 }
 
 const controller = new AbortController();
-const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+const timeout = setTimeout(() => controller.abort(), hermesTimeoutMs);
 
 main()
   .catch((error) => {
@@ -77,4 +78,9 @@ function extractHermesText(data) {
   }
 
   return '';
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
