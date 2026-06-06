@@ -92,6 +92,12 @@ systemctl --user enable --now hermes-gateway
 systemctl --user enable --now telegram-bot
 ```
 
+Or run:
+
+```bash
+bash deploy/setup-services.sh
+```
+
 Allow user services to keep running after SSH logout:
 
 ```bash
