@@ -32,6 +32,7 @@ HERMES_INSTRUCTIONS=Answer clearly and concisely.
 ```
 
 Use `/id` in the bot to see your numeric Telegram user ID, then put it into `ALLOWED_TELEGRAM_USER_IDS`.
+On the server, `deploy/configure-env.sh` can generate and sync `HERMES_API_KEY` with Hermes `API_SERVER_KEY`.
 
 ## Hermes Agent API
 
@@ -50,6 +51,12 @@ API_SERVER_ENABLED=true
 API_SERVER_HOST=127.0.0.1
 API_SERVER_PORT=8642
 API_SERVER_KEY=replace_with_same_value_as_hermes_api_key
+```
+
+Or run:
+
+```bash
+bash deploy/configure-env.sh
 ```
 
 Run Hermes:
