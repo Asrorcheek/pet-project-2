@@ -1,6 +1,7 @@
 # Telegram Hermes Bot
 
-Node.js Telegram bot that forwards user messages to a local Hermes Agent API server and sends the answer back to Telegram.
+Node.js Telegram bot that forwards text messages to a local Hermes Agent API server and sends the answer back to Telegram.
+Voice/audio messages can create Google Calendar events with Google Meet links and return the meeting link in chat.
 
 ## Required Runtime
 
@@ -9,6 +10,10 @@ Node.js Telegram bot that forwards user messages to a local Hermes Agent API ser
 - Git
 - Hermes Agent installed and configured
 - Telegram bot token from BotFather
+- OpenAI API key for audio transcription
+- Google OAuth client or service account with Calendar API access
+- Hermes web/browser tools for product image discovery
+- Meta/Instagram professional account token for live Instagram publishing
 
 ## Environment
 
@@ -29,10 +34,91 @@ HERMES_API_BASE=http://127.0.0.1:8642/v1
 HERMES_API_KEY=replace_with_same_value_as_api_server_key
 HERMES_MODEL=hermes-agent
 HERMES_INSTRUCTIONS=Answer clearly and concisely.
+HERMES_TIMEOUT_MS=180000
+
+OPENAI_API_KEY=replace_with_openai_api_key
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+
+# Option A: Google service account JSON key.
+GOOGLE_CREDENTIALS_FILE=credentials.json
+GOOGLE_IMPERSONATE_USER_EMAIL=
+
+# Option B: Google OAuth user refresh token.
+GOOGLE_CLIENT_ID=replace_with_google_oauth_client_id
+GOOGLE_CLIENT_SECRET=replace_with_google_oauth_client_secret
+GOOGLE_REFRESH_TOKEN=replace_with_google_oauth_refresh_token
+
+GOOGLE_CALENDAR_ID=primary
+GOOGLE_CALENDAR_TIME_ZONE=Asia/Tashkent
+GOOGLE_CALENDAR_SEND_UPDATES=all
+DEFAULT_EVENT_DURATION_MINUTES=30
+
+STORE_NAME=replace_with_store_name
+STORE_INSTAGRAM_USERNAME=replace_with_instagram_username
+STORE_LANGUAGE=uz
+STORE_CURRENCY=USD
+STORE_CITY=Tashkent
+STORE_CONTACT_TEXT=DM or Telegram
+STORE_CONTACT_URL=
+DEFAULT_HASHTAGS="#computer #laptop #tashkent"
+
+META_API_VERSION=v25.0
+INSTAGRAM_GRAPH_BASE=https://graph.instagram.com
+INSTAGRAM_PROFESSIONAL_ACCOUNT_ID=replace_with_instagram_professional_account_id
+INSTAGRAM_ACCESS_TOKEN=replace_with_meta_access_token
+
+POSTING_TIMEZONE=Asia/Tashkent
+POSTING_ALLOWED_DAYS=mon,tue,wed,thu,fri,sat,sun
+POSTING_ALLOWED_HOURS=10:00-22:00
+POSTING_MAX_PER_DAY=3
+POSTING_FALLBACK_WINDOWS=11:00,15:00,19:00
+INSTAGRAM_POST_STORE_FILE=data/instagram-posts.json
 ```
 
 Use `/id` in the bot to see your numeric Telegram user ID, then put it into `ALLOWED_TELEGRAM_USER_IDS`.
 On the server, `deploy/configure-env.sh` can generate and sync `HERMES_API_KEY` with Hermes `API_SERVER_KEY`.
+
+## Voice Meeting Creation
+
+When the bot receives a Telegram voice/audio message, it:
+
+1. Downloads the Telegram audio file.
+2. Sends it to OpenAI speech-to-text.
+3. Asks Hermes to extract `summary`, `start`, `end`, `attendees`, and `description`.
+4. Creates a Google Calendar event with a fresh Google Meet conference.
+5. Sends the Google Meet link back to Telegram.
+
+The voice message should include at least a date and start time. If no duration or end time is spoken, `DEFAULT_EVENT_DURATION_MINUTES` is used. Attendees are added only when the transcript contains explicit email addresses.
+
+Google OAuth must be authorized for one of these Calendar scopes:
+
+```text
+https://www.googleapis.com/auth/calendar
+https://www.googleapis.com/auth/calendar.events
+```
+
+For personal calendars, use an OAuth refresh token for the Google account that owns the calendar. `GOOGLE_CALENDAR_ID=primary` targets that account's main calendar.
+
+If you use `GOOGLE_CREDENTIALS_FILE=credentials.json`, the file must be a Google service account JSON key. Share the target calendar with the service account `client_email` and grant permission to make changes to events, then set `GOOGLE_CALENDAR_ID` to that shared calendar ID, usually the calendar owner's email address for a primary calendar. `primary` refers to the service account's own calendar and is usually not what you want. For Google Workspace domain-wide delegation, set `GOOGLE_IMPERSONATE_USER_EMAIL` to the calendar owner email.
+
+## Instagram Product Posts
+
+Start a Telegram draft with:
+
+```text
+/post MacBook Air M2 8/256, $720
+```
+
+The bot will:
+
+1. Ask Hermes to search the web for exact-model product image candidates.
+2. Send numbered image options to Telegram.
+3. Wait for you to approve an image, reject/search again, or provide a public JPEG image URL.
+4. Generate a caption through Hermes using the configured store profile.
+5. Wait for final approval: `approve`, `post now`, `schedule tomorrow 19:00`, `change caption ...`, or `cancel`.
+6. Publish through the official Meta Graph API only when `INSTAGRAM_PROFESSIONAL_ACCOUNT_ID` and `INSTAGRAM_ACCESS_TOKEN` are configured.
+
+Approved scheduled posts are stored in `data/instagram-posts.json` so they survive bot restarts. Instagram publishing requires a professional Instagram account and a public JPEG image URL. If Hermes returns no safe image candidates or Meta credentials are missing, the bot still creates a draft and explains what is needed.
 
 ## Hermes Agent API
 
