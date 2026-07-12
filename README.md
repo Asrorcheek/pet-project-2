@@ -1,7 +1,7 @@
 # Telegram Hermes Bot
 
 Node.js Telegram bot that forwards text messages to a local Hermes Agent API server and sends the answer back to Telegram.
-Voice/audio messages can create Google Calendar events with Google Meet links and return the meeting link in chat.
+Voice/audio messages and `/meet` text commands can create Google Calendar events with Google Meet links and return the meeting link in chat. After a meeting ends, the bot polls Google Meet for generated recordings and sends every new recording link to the originating Telegram chat once.
 
 ## Required Runtime
 
@@ -96,6 +96,27 @@ Google OAuth must be authorized for one of these Calendar scopes:
 https://www.googleapis.com/auth/calendar
 https://www.googleapis.com/auth/calendar.events
 ```
+
+Text requests are also supported:
+
+```text
+/meet Acme kompaniyasi, ertaga soat 15:00
+```
+
+When no end time is supplied, the meeting lasts 30 minutes by default.
+
+## Meeting recordings
+
+The bot stores created event IDs, Meet codes, Telegram chat IDs, and delivered recording IDs in `data/meetings.json`. After the scheduled end time it polls Google Meet, then sends each recording whose state is `FILE_GENERATED`. Delivered recording resource names are persisted so restarts do not cause duplicate messages.
+
+The Google OAuth grant must include these additional scopes:
+
+```text
+https://www.googleapis.com/auth/meetings.space.readonly
+https://www.googleapis.com/auth/drive.meet.readonly
+```
+
+`RECORDING_POLL_INTERVAL_SECONDS` controls polling frequency (default 300 seconds), and `RECORDING_TRACKING_DAYS` controls how long ended meetings remain eligible (default 30 days). Google Meet recording availability depends on the organizer's Google Workspace edition and recording must actually be started during the meeting.
 
 For personal calendars, use an OAuth refresh token for the Google account that owns the calendar. `GOOGLE_CALENDAR_ID=primary` targets that account's main calendar.
 

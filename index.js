@@ -12,10 +12,13 @@ const DEFAULT_HERMES_API_BASE = 'http://127.0.0.1:8642/v1';
 const OPENAI_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_CALENDAR_EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+const GOOGLE_MEET_READONLY_SCOPE = 'https://www.googleapis.com/auth/meetings.space.readonly';
+const GOOGLE_DRIVE_MEET_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.meet.readonly';
 const DEFAULT_CALENDAR_ID = 'primary';
 const DEFAULT_INSTAGRAM_GRAPH_BASE = 'https://graph.instagram.com';
 const DEFAULT_META_API_VERSION = 'v25.0';
 const DEFAULT_INSTAGRAM_POST_STORE_FILE = path.join('data', 'instagram-posts.json');
+const DEFAULT_MEETING_STORE_FILE = path.join('data', 'meetings.json');
 const execFileAsync = promisify(execFile);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -43,6 +46,9 @@ const googleCalendarTimeZone = process.env.GOOGLE_CALENDAR_TIME_ZONE
   || 'UTC';
 const googleCalendarSendUpdates = normalizeSendUpdates(process.env.GOOGLE_CALENDAR_SEND_UPDATES);
 const defaultEventDurationMinutes = parsePositiveInt(process.env.DEFAULT_EVENT_DURATION_MINUTES, 30);
+const meetingStoreFile = process.env.MEETING_STORE_FILE || DEFAULT_MEETING_STORE_FILE;
+const recordingPollIntervalMs = parsePositiveInt(process.env.RECORDING_POLL_INTERVAL_SECONDS, 300) * 1000;
+const recordingTrackingDays = parsePositiveInt(process.env.RECORDING_TRACKING_DAYS, 30);
 const metaApiVersion = normalizeMetaApiVersion(process.env.META_API_VERSION || DEFAULT_META_API_VERSION);
 const instagramGraphBase = normalizeBaseUrl(
   process.env.INSTAGRAM_GRAPH_BASE || DEFAULT_INSTAGRAM_GRAPH_BASE
@@ -71,6 +77,8 @@ const postingConfig = {
 };
 let googleTokenCache = null;
 let instagramStore = loadInstagramStore();
+let meetingStore = loadMeetingStore();
+let recordingPollRunning = false;
 const instagramSessions = restoreInstagramSessions(instagramStore);
 const mentorSessions = new Set();
 
@@ -100,6 +108,9 @@ if (missingInstagramPublishConfig.length > 0) {
 
 const bot = new TelegramBot(token, { polling: true });
 
+setTimeout(() => pollMeetingRecordings().catch(logRecordingPollError), 5000);
+setInterval(() => pollMeetingRecordings().catch(logRecordingPollError), recordingPollIntervalMs);
+
 bot.onText(/\/start/, async (msg) => {
   if (!isAllowed(msg.from)) {
     await denyAccess(msg.chat.id);
@@ -125,11 +136,27 @@ bot.onText(/\/help/, async (msg) => {
       '/start - botni boshlash',
       '/help - yordam',
       '/id - Telegram user ID ni ko`rsatish',
+      '/meet kompaniya, sana va vaqt - 30 daqiqalik Google Meet yaratish',
       '/post product model - Instagram product post draft yaratish',
       '/cancelpost - aktiv Instagram post draftni bekor qilish',
       'Ovozli xabar - Google Calendar event va Google Meet havolasini yaratish',
     ].join('\n')
   );
+});
+
+bot.onText(/^\/meet(?:@\w+)?(?:\s+([\s\S]+))?$/i, async (msg, match) => {
+  if (!isAllowed(msg.from)) {
+    await denyAccess(msg.chat.id);
+    return;
+  }
+
+  const request = normalizeText(match?.[1]);
+  if (!request) {
+    await bot.sendMessage(msg.chat.id, 'Misol: /meet Acme kompaniyasi, ertaga soat 15:00');
+    return;
+  }
+
+  await handleMeetingRequest(msg, request, 'text');
 });
 
 bot.onText(/\/id/, async (msg) => {
@@ -187,6 +214,11 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  if (isTextMeetingRequest(msg.text)) {
+    await handleMeetingRequest(msg, msg.text, 'text');
+    return;
+  }
+
   await handleTextMessage(msg);
 });
 
@@ -238,24 +270,7 @@ async function handleAudioMeetingMessage(msg) {
         throw new UserVisibleError('Ovozli xabar matnini aniqlay olmadim. Iltimos, aniqroq qayta yuboring.');
       }
 
-      const eventDetails = await extractCalendarEvent(transcript, msg.chat.id);
-      const missingFields = getMissingCalendarFields(eventDetails);
-
-      if (missingFields.length > 0) {
-        throw new UserVisibleError(
-          [
-            `Uchrashuvni yaratish uchun yetarli ma'lumot yo'q: ${missingFields.join(', ')}.`,
-            '',
-            `Aniqlangan matn: ${transcript}`,
-          ].join('\n')
-        );
-      }
-
-      const event = await createGoogleCalendarEvent(eventDetails, transcript);
-      const meetLink = extractMeetLink(event);
-      const reply = formatCreatedMeetingReply(event, eventDetails, meetLink);
-
-      await bot.sendMessage(msg.chat.id, reply);
+      await createAndReplyWithMeeting(msg, transcript, 'audio');
     });
   } catch (error) {
     if (error instanceof UserVisibleError) {
@@ -266,6 +281,45 @@ async function handleAudioMeetingMessage(msg) {
     console.error('Audio meeting creation failed:', error);
     await bot.sendMessage(msg.chat.id, 'Google Calendar uchrashuvini yaratishda xatolik yuz berdi.');
   }
+}
+
+async function handleMeetingRequest(msg, request, source) {
+  try {
+    await withChatAction(msg.chat.id, 'typing', async () => {
+      assertGoogleMeetingConfig();
+      await createAndReplyWithMeeting(msg, request, source);
+    });
+  } catch (error) {
+    if (error instanceof UserVisibleError) {
+      await bot.sendMessage(msg.chat.id, error.message);
+      return;
+    }
+
+    console.error('Meeting creation failed:', error);
+    await bot.sendMessage(msg.chat.id, 'Google Calendar uchrashuvini yaratishda xatolik yuz berdi.');
+  }
+}
+
+async function createAndReplyWithMeeting(msg, request, source) {
+  const eventDetails = await extractCalendarEvent(request, msg.chat.id);
+  const missingFields = getMissingCalendarFields(eventDetails);
+
+  if (missingFields.length > 0) {
+    throw new UserVisibleError(
+      [
+        `Uchrashuvni yaratish uchun yetarli ma'lumot yo'q: ${missingFields.join(', ')}.`,
+        '',
+        `Aniqlangan matn: ${request}`,
+      ].join('\n')
+    );
+  }
+
+  const event = await createGoogleCalendarEvent(eventDetails, request);
+  const meetLink = extractMeetLink(event);
+  const reply = formatCreatedMeetingReply(event, eventDetails, meetLink);
+
+  trackMeeting(event, eventDetails, meetLink, msg.chat.id, source);
+  await bot.sendMessage(msg.chat.id, reply);
 }
 
 bot.on('polling_error', (error) => {
@@ -1301,6 +1355,175 @@ function buildEventDescription(description, transcript) {
     .join('\n');
 }
 
+function isTextMeetingRequest(text) {
+  const value = normalizeText(text);
+  if (!value) {
+    return false;
+  }
+
+  const mentionsMeeting = /\b(?:google\s*meet|meet|meeting|uchrashuv|митинг|встреча)\b/i.test(value);
+  const mentionsTime = /\b(?:bugun|ertaga|today|tomorrow|сегодня|завтра|soat|at|в|\d{1,2}[:.]\d{2})\b/i.test(value);
+  return mentionsMeeting && mentionsTime;
+}
+
+function trackMeeting(event, eventDetails, meetLink, chatId, source) {
+  const meetingCode = extractMeetingCode(meetLink);
+  if (!event.id || !meetingCode) {
+    console.warn('Meeting recording tracking skipped: Calendar event ID or Meet code is missing.');
+    return;
+  }
+
+  const tracked = {
+    eventId: event.id,
+    chatId: String(chatId),
+    summary: event.summary || eventDetails.summary || 'Meeting',
+    startDateTime: event.start?.dateTime || eventDetails.start.dateTime,
+    endDateTime: event.end?.dateTime || eventDetails.end.dateTime,
+    meetLink,
+    meetingCode,
+    source,
+    createdAt: new Date().toISOString(),
+    conferenceRecords: [],
+    sentRecordingNames: [],
+    lastCheckedAt: null,
+    lastError: null,
+  };
+
+  const index = meetingStore.meetings.findIndex((item) => item.eventId === tracked.eventId);
+  if (index >= 0) {
+    meetingStore.meetings[index] = { ...meetingStore.meetings[index], ...tracked };
+  } else {
+    meetingStore.meetings.push(tracked);
+  }
+  saveMeetingStore();
+}
+
+function extractMeetingCode(meetLink) {
+  try {
+    const url = new URL(meetLink);
+    if (url.hostname !== 'meet.google.com') {
+      return '';
+    }
+    return url.pathname.split('/').filter(Boolean)[0] || '';
+  } catch (error) {
+    return '';
+  }
+}
+
+async function pollMeetingRecordings() {
+  if (recordingPollRunning || meetingStore.meetings.length === 0) {
+    return;
+  }
+
+  recordingPollRunning = true;
+  try {
+    for (const meeting of meetingStore.meetings) {
+      if (!shouldPollMeeting(meeting)) {
+        continue;
+      }
+
+      try {
+        await pollOneMeetingRecordings(meeting);
+        meeting.lastError = null;
+      } catch (error) {
+        meeting.lastError = `${new Date().toISOString()} ${error.message}`;
+        console.error(`Recording poll failed for event ${meeting.eventId}:`, error.message);
+      }
+      meeting.lastCheckedAt = new Date().toISOString();
+      saveMeetingStore();
+    }
+  } finally {
+    recordingPollRunning = false;
+  }
+}
+
+function shouldPollMeeting(meeting) {
+  const endMs = Date.parse(meeting.endDateTime);
+  if (!Number.isFinite(endMs) || Date.now() < endMs) {
+    return false;
+  }
+  return Date.now() - endMs <= recordingTrackingDays * 24 * 60 * 60 * 1000;
+}
+
+async function pollOneMeetingRecordings(meeting) {
+  const conferenceRecords = await listConferenceRecords(meeting);
+  meeting.conferenceRecords = conferenceRecords.map((record) => record.name).filter(Boolean);
+
+  for (const record of conferenceRecords.filter((item) => item.name)) {
+    const recordings = await listConferenceRecordings(record.name);
+    for (const recording of recordings) {
+      if (
+        recording.state !== 'FILE_GENERATED'
+        || !recording.name
+        || meeting.sentRecordingNames.includes(recording.name)
+      ) {
+        continue;
+      }
+
+      const exportUri = recording.driveDestination?.exportUri;
+      if (!exportUri) {
+        continue;
+      }
+
+      await bot.sendMessage(
+        meeting.chatId,
+        [
+          `Meeting recording tayyor: ${meeting.summary}`,
+          `Recording: ${exportUri}`,
+          recording.startTime ? `Boshlangan: ${recording.startTime}` : '',
+        ].filter(Boolean).join('\n'),
+        { disable_web_page_preview: true }
+      );
+      meeting.sentRecordingNames.push(recording.name);
+      saveMeetingStore();
+    }
+  }
+}
+
+async function listConferenceRecords(meeting) {
+  const accessToken = await getGoogleAccessToken();
+  const url = new URL('https://meet.googleapis.com/v2/conferenceRecords');
+  url.searchParams.set('pageSize', '100');
+  url.searchParams.set('filter', `space.meeting_code = "${meeting.meetingCode}"`);
+
+  const data = await fetchGoogleJson(url, accessToken, 'Google Meet conferenceRecords.list');
+  const records = Array.isArray(data.conferenceRecords) ? data.conferenceRecords : [];
+  const scheduledStart = Date.parse(meeting.startDateTime);
+  const scheduledEnd = Date.parse(meeting.endDateTime);
+
+  return records.filter((record) => {
+    const actualStart = Date.parse(record.startTime);
+    if (![scheduledStart, scheduledEnd, actualStart].every(Number.isFinite)) {
+      return true;
+    }
+    const margin = 12 * 60 * 60 * 1000;
+    return actualStart >= scheduledStart - margin && actualStart <= scheduledEnd + margin;
+  });
+}
+
+async function listConferenceRecordings(conferenceRecordName) {
+  const accessToken = await getGoogleAccessToken();
+  const url = new URL(`https://meet.googleapis.com/v2/${conferenceRecordName}/recordings`);
+  url.searchParams.set('pageSize', '100');
+  const data = await fetchGoogleJson(url, accessToken, 'Google Meet recordings.list');
+  return Array.isArray(data.recordings) ? data.recordings : [];
+}
+
+async function fetchGoogleJson(url, accessToken, label) {
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const bodyText = await response.text();
+  if (!response.ok) {
+    throw new Error(`${label} HTTP ${response.status}: ${bodyText}`);
+  }
+  return bodyText ? JSON.parse(bodyText) : {};
+}
+
+function logRecordingPollError(error) {
+  console.error('Meeting recording poll failed:', error);
+}
+
 async function getGoogleAccessToken() {
   if (googleTokenCache && Date.now() < googleTokenCache.expiresAt - 60000) {
     return googleTokenCache.accessToken;
@@ -1399,7 +1622,11 @@ function createGoogleServiceAccountJwt(credentials) {
   };
   const claimSet = {
     iss: credentials.client_email,
-    scope: GOOGLE_CALENDAR_EVENTS_SCOPE,
+    scope: [
+      GOOGLE_CALENDAR_EVENTS_SCOPE,
+      GOOGLE_MEET_READONLY_SCOPE,
+      GOOGLE_DRIVE_MEET_READONLY_SCOPE,
+    ].join(' '),
     aud: credentials.token_uri || GOOGLE_TOKEN_URL,
     exp: now + 3600,
     iat: now,
@@ -1665,6 +1892,29 @@ function buildFallbackInstagramCaption(draft) {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+function loadMeetingStore() {
+  const filePath = resolveProjectPath(meetingStoreFile);
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { meetings: [] };
+    }
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return {
+      meetings: Array.isArray(data.meetings) ? data.meetings : [],
+    };
+  } catch (error) {
+    console.warn(`Could not read meeting store: ${error.message}`);
+    return { meetings: [] };
+  }
+}
+
+function saveMeetingStore() {
+  const filePath = resolveProjectPath(meetingStoreFile);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(meetingStore, null, 2)}\n`);
 }
 
 function loadInstagramStore() {
@@ -2211,6 +2461,14 @@ function assertAudioMeetingConfig() {
 
   if (missing.length > 0) {
     throw new UserVisibleError(`Audio meeting tool hali sozlanmagan. Missing env vars: ${missing.join(', ')}`);
+  }
+}
+
+function assertGoogleMeetingConfig() {
+  if (!hasGoogleOAuthConfig() && !hasGoogleServiceAccountConfig()) {
+    throw new UserVisibleError(
+      'Google Meet tool hali sozlanmagan. Missing env vars: GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN or GOOGLE_CREDENTIALS_FILE'
+    );
   }
 }
 
