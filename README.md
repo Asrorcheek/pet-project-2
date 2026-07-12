@@ -141,6 +141,12 @@ The bot will:
 
 Approved scheduled posts are stored in `data/instagram-posts.json` so they survive bot restarts. Instagram publishing requires a professional Instagram account and a public JPEG image URL. If Hermes returns no safe image candidates or Meta credentials are missing, the bot still creates a draft and explains what is needed.
 
+## Instagram Analytics
+
+Use `/analytics` for the last 30 days or `/analytics 7` for the last 7 days. The bot refreshes account and media insights before replying, including views, reach, likes, comments, saves, shares, total interactions, and engagement per reached account.
+
+Snapshots are stored in `data/instagram-insights.json` and refreshed in the background every `INSTAGRAM_INSIGHTS_REFRESH_MINUTES` (default: 360). When the requested period has no posts, the report clearly falls back to all available media. Accounts with fewer than 100 followers use observed post performance instead of follower-active-time data.
+
 ## Hermes Agent API
 
 Install Hermes Agent:

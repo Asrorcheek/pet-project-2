@@ -18,6 +18,7 @@ const DEFAULT_CALENDAR_ID = 'primary';
 const DEFAULT_INSTAGRAM_GRAPH_BASE = 'https://graph.instagram.com';
 const DEFAULT_META_API_VERSION = 'v25.0';
 const DEFAULT_INSTAGRAM_POST_STORE_FILE = path.join('data', 'instagram-posts.json');
+const DEFAULT_INSTAGRAM_INSIGHTS_STORE_FILE = path.join('data', 'instagram-insights.json');
 const DEFAULT_MEETING_STORE_FILE = path.join('data', 'meetings.json');
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +57,12 @@ const instagramGraphBase = normalizeBaseUrl(
 const instagramProfessionalAccountId = normalizeText(process.env.INSTAGRAM_PROFESSIONAL_ACCOUNT_ID);
 const instagramAccessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
 const instagramPostStoreFile = process.env.INSTAGRAM_POST_STORE_FILE || DEFAULT_INSTAGRAM_POST_STORE_FILE;
+const instagramInsightsStoreFile = process.env.INSTAGRAM_INSIGHTS_STORE_FILE
+  || DEFAULT_INSTAGRAM_INSIGHTS_STORE_FILE;
+const instagramInsightsRefreshMs = parsePositiveInt(
+  process.env.INSTAGRAM_INSIGHTS_REFRESH_MINUTES,
+  360
+) * 60 * 1000;
 const hermesPythonBin = process.env.HERMES_PYTHON_BIN
   || path.join(process.env.HOME || '', '.hermes', 'hermes-agent', 'venv', 'bin', 'python');
 const storeProfile = {
@@ -77,6 +84,7 @@ const postingConfig = {
 };
 let googleTokenCache = null;
 let instagramStore = loadInstagramStore();
+let instagramInsightsStore = loadInstagramInsightsStore();
 let meetingStore = loadMeetingStore();
 let recordingPollRunning = false;
 const instagramSessions = restoreInstagramSessions(instagramStore);
@@ -110,6 +118,8 @@ const bot = new TelegramBot(token, { polling: true });
 
 setTimeout(() => pollMeetingRecordings().catch(logRecordingPollError), 5000);
 setInterval(() => pollMeetingRecordings().catch(logRecordingPollError), recordingPollIntervalMs);
+setTimeout(() => refreshInstagramInsights().catch(logInstagramInsightsError), 15000);
+setInterval(() => refreshInstagramInsights().catch(logInstagramInsightsError), instagramInsightsRefreshMs);
 
 bot.onText(/\/start/, async (msg) => {
   if (!isAllowed(msg.from)) {
@@ -138,6 +148,7 @@ bot.onText(/\/help/, async (msg) => {
       '/id - Telegram user ID ni ko`rsatish',
       '/meet kompaniya, sana va vaqt - 30 daqiqalik Google Meet yaratish',
       '/post product model - Instagram product post draft yaratish',
+      '/analytics [7|30] - Instagram post natijalari hisoboti',
       '/cancelpost - aktiv Instagram post draftni bekor qilish',
       'Ovozli xabar - Google Calendar event va Google Meet havolasini yaratish',
     ].join('\n')
@@ -188,6 +199,15 @@ bot.onText(/^\/posts(?:@\w+)?$/i, async (msg) => {
   }
 
   await sendInstagramPostStatus(msg.chat.id);
+});
+
+bot.onText(/^\/analytics(?:@\w+)?(?:\s+(7|30))?$/i, async (msg, match) => {
+  if (!isAllowed(msg.from)) {
+    await denyAccess(msg.chat.id);
+    return;
+  }
+
+  await sendInstagramAnalyticsReport(msg.chat.id, Number(match?.[1] || 30));
 });
 
 bot.on('message', async (msg) => {
@@ -790,6 +810,163 @@ async function sendInstagramPostStatus(chatId) {
       })
       .join('\n\n')
   );
+}
+
+async function sendInstagramAnalyticsReport(chatId, days) {
+  const missing = getMissingInstagramPublishConfig();
+  if (missing.length > 0) {
+    await bot.sendMessage(chatId, `Instagram analytics sozlanmagan. Missing env vars: ${missing.join(', ')}`);
+    return;
+  }
+
+  try {
+    await withChatAction(chatId, 'typing', async () => {
+      await refreshInstagramInsights();
+      await sendLongMessage(chatId, formatInstagramAnalyticsReport(days));
+    });
+  } catch (error) {
+    const message = redactAccessToken(error.message || String(error));
+    console.error('Instagram analytics report failed:', message);
+    await bot.sendMessage(chatId, `Instagram analytics olishda xatolik: ${message}`);
+  }
+}
+
+async function refreshInstagramInsights() {
+  if (getMissingInstagramPublishConfig().length > 0) {
+    return;
+  }
+
+  const account = await fetchInstagramJson(
+    `${instagramProfessionalAccountId}?fields=id,username,account_type,media_count,followers_count&access_token=${encodeURIComponent(instagramAccessToken)}`
+  );
+  const mediaResponse = await fetchInstagramJson(
+    `${instagramProfessionalAccountId}/media?fields=id,caption,media_type,media_product_type,timestamp,permalink&limit=100&access_token=${encodeURIComponent(instagramAccessToken)}`
+  );
+  const mediaItems = Array.isArray(mediaResponse.data) ? mediaResponse.data : [];
+  const collectedAt = new Date().toISOString();
+  const media = [];
+
+  for (const item of mediaItems) {
+    try {
+      const insights = await fetchInstagramJson(
+        `${item.id}/insights?metric=views,reach,likes,comments,saved,shares,total_interactions&access_token=${encodeURIComponent(instagramAccessToken)}`
+      );
+      media.push({
+        id: item.id,
+        caption: truncateText(item.caption || '', 500),
+        mediaType: item.media_type || '',
+        mediaProductType: item.media_product_type || '',
+        timestamp: item.timestamp || '',
+        permalink: item.permalink || '',
+        metrics: normalizeInstagramInsightMetrics(insights.data),
+      });
+    } catch (error) {
+      console.warn(`Instagram insights skipped for media ${item.id}: ${redactAccessToken(error.message)}`);
+    }
+  }
+
+  const snapshot = {
+    collectedAt,
+    account: {
+      id: account.id || instagramProfessionalAccountId,
+      username: account.username || storeProfile.instagramUsername,
+      accountType: account.account_type || '',
+      mediaCount: Number(account.media_count || mediaItems.length),
+      followersCount: Number(account.followers_count || 0),
+    },
+    media,
+  };
+
+  instagramInsightsStore.latest = snapshot;
+  instagramInsightsStore.history.push(buildInstagramAccountHistoryPoint(snapshot));
+  instagramInsightsStore.history = instagramInsightsStore.history.slice(-360);
+  saveInstagramInsightsStore();
+}
+
+function normalizeInstagramInsightMetrics(data) {
+  const metrics = {};
+  for (const item of Array.isArray(data) ? data : []) {
+    const value = item.values?.[0]?.value;
+    if (item.name && Number.isFinite(Number(value))) {
+      metrics[item.name] = Number(value);
+    }
+  }
+  return metrics;
+}
+
+function buildInstagramAccountHistoryPoint(snapshot) {
+  return {
+    collectedAt: snapshot.collectedAt,
+    followersCount: snapshot.account.followersCount,
+    mediaCount: snapshot.account.mediaCount,
+    totalReach: sumInstagramMetric(snapshot.media, 'reach'),
+    totalViews: sumInstagramMetric(snapshot.media, 'views'),
+    totalInteractions: sumInstagramMetric(snapshot.media, 'total_interactions'),
+  };
+}
+
+function formatInstagramAnalyticsReport(days) {
+  const snapshot = instagramInsightsStore.latest;
+  if (!snapshot?.media?.length) {
+    return 'Instagram analytics ma`lumoti hali yo`q.';
+  }
+
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const selected = snapshot.media.filter((item) => {
+    const publishedAt = Date.parse(item.timestamp);
+    return Number.isFinite(publishedAt) && publishedAt >= cutoff;
+  });
+  const media = selected.length > 0 ? selected : snapshot.media;
+  const ranked = media
+    .map((item) => ({ ...item, engagementRate: calculateInstagramEngagementRate(item.metrics) }))
+    .sort((a, b) => (b.metrics.total_interactions || 0) - (a.metrics.total_interactions || 0));
+  const top = ranked.slice(0, 5);
+  const totalReach = sumInstagramMetric(media, 'reach');
+  const totalViews = sumInstagramMetric(media, 'views');
+  const totalInteractions = sumInstagramMetric(media, 'total_interactions');
+  const overallRate = totalReach > 0 ? (totalInteractions / totalReach) * 100 : 0;
+  const periodLabel = selected.length > 0 ? `${days} kun` : 'barcha mavjud postlar';
+
+  return [
+    `Instagram analytics — @${snapshot.account.username || storeProfile.instagramUsername}`,
+    `Davr: ${periodLabel}`,
+    `Followerlar: ${snapshot.account.followersCount}`,
+    `Postlar: ${media.length}`,
+    `Views: ${totalViews}`,
+    `Reach: ${totalReach}`,
+    `Interactions: ${totalInteractions}`,
+    `Engagement/reach: ${overallRate.toFixed(1)}%`,
+    '',
+    'Eng yaxshi postlar:',
+    ...top.map((item, index) => [
+      `${index + 1}. ${instagramMediaLabel(item)}`,
+      `Views ${item.metrics.views || 0} | Reach ${item.metrics.reach || 0} | Interactions ${item.metrics.total_interactions || 0} | ER ${item.engagementRate.toFixed(1)}%`,
+      item.permalink,
+    ].filter(Boolean).join('\n')),
+    '',
+    snapshot.account.followersCount < 100
+      ? 'Eslatma: followerlar 100 dan kam, shuning uchun follower-active time o`rniga post natijalari ishlatiladi.'
+      : 'Follower-active time keyingi scheduling hisobiga qo`shilishi mumkin.',
+    `Yangilangan: ${formatScheduledAt(new Date(snapshot.collectedAt))}`,
+  ].join('\n');
+}
+
+function instagramMediaLabel(item) {
+  const firstLine = normalizeText(item.caption).split('\n')[0];
+  return truncateText(firstLine || item.mediaProductType || item.mediaType || item.id, 80);
+}
+
+function sumInstagramMetric(media, metric) {
+  return media.reduce((sum, item) => sum + Number(item.metrics?.[metric] || 0), 0);
+}
+
+function calculateInstagramEngagementRate(metrics) {
+  const reach = Number(metrics?.reach || 0);
+  return reach > 0 ? (Number(metrics?.total_interactions || 0) / reach) * 100 : 0;
+}
+
+function logInstagramInsightsError(error) {
+  console.error('Instagram insights refresh failed:', redactAccessToken(error.message || String(error)));
 }
 
 async function cancelInstagramDraft(chatId, message) {
@@ -1915,6 +2092,30 @@ function saveMeetingStore() {
   const filePath = resolveProjectPath(meetingStoreFile);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(meetingStore, null, 2)}\n`);
+}
+
+function loadInstagramInsightsStore() {
+  const filePath = resolveProjectPath(instagramInsightsStoreFile);
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { latest: null, history: [] };
+    }
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return {
+      latest: data.latest && typeof data.latest === 'object' ? data.latest : null,
+      history: Array.isArray(data.history) ? data.history : [],
+    };
+  } catch (error) {
+    console.warn(`Could not read Instagram insights store: ${error.message}`);
+    return { latest: null, history: [] };
+  }
+}
+
+function saveInstagramInsightsStore() {
+  const filePath = resolveProjectPath(instagramInsightsStoreFile);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(instagramInsightsStore, null, 2)}\n`);
 }
 
 function loadInstagramStore() {
