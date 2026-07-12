@@ -583,7 +583,10 @@ async function prepareInstagramPostPreview(chatId, draft) {
 
     draft.caption = postPackage.caption;
     draft.altText = postPackage.altText;
-    draft.recommendedScheduleAt = chooseNextPostingTime(new Date()).toISOString();
+    const recommendation = chooseNextPostingRecommendation(new Date());
+    draft.recommendedScheduleAt = recommendation.date.toISOString();
+    draft.recommendationSource = recommendation.source;
+    draft.recommendationSampleSize = recommendation.sampleSize;
     draft.status = 'waiting_for_final_approval';
     saveInstagramDraft(draft);
 
@@ -780,6 +783,7 @@ async function sendInstagramPostPreview(chatId, draft) {
       imageLine,
       `Alt text: ${draft.altText || 'not set'}`,
       `Recommended time: ${formatScheduledAt(recommendedAt)}`,
+      `Recommendation: ${formatPostingRecommendationSource(draft)}`,
       '',
       'Reply:',
       'post now',
@@ -1988,6 +1992,8 @@ function createInstagramDraft(msg, productInput, product) {
     caption: '',
     altText: '',
     recommendedScheduleAt: null,
+    recommendationSource: '',
+    recommendationSampleSize: 0,
     pendingAction: null,
     pendingScheduleAt: null,
     scheduledAt: null,
@@ -2204,14 +2210,25 @@ function isActiveInstagramStatus(status) {
 }
 
 function chooseNextPostingTime(from) {
+  return chooseNextPostingRecommendation(from).date;
+}
+
+function chooseNextPostingRecommendation(from) {
   const candidates = [];
   const earliest = new Date(from.getTime() + 5 * 60 * 1000);
+  const windowScores = buildPostingWindowScores();
+  const startParts = getDatePartsInTimeZone(from, postingConfig.timeZone);
 
   for (let dayOffset = 0; dayOffset < 14; dayOffset += 1) {
     for (const windowTime of postingConfig.fallbackWindows) {
-      const candidate = new Date(from);
-      candidate.setDate(from.getDate() + dayOffset);
-      candidate.setHours(windowTime.hour, windowTime.minute, 0, 0);
+      const localDay = new Date(Date.UTC(startParts.year, startParts.month - 1, startParts.day + dayOffset));
+      const candidate = zonedDateTimeToUtc({
+        year: localDay.getUTCFullYear(),
+        month: localDay.getUTCMonth() + 1,
+        day: localDay.getUTCDate(),
+        hour: windowTime.hour,
+        minute: windowTime.minute,
+      }, postingConfig.timeZone);
 
       if (candidate <= earliest) {
         continue;
@@ -2225,12 +2242,116 @@ function chooseNextPostingTime(from) {
         continue;
       }
 
-      candidates.push(candidate);
+      const score = windowScores.scores.get(windowTime.hour) || 0;
+      candidates.push({ date: candidate, score });
     }
   }
 
-  candidates.sort((a, b) => a.getTime() - b.getTime());
-  return candidates[0] || new Date(from.getTime() + 60 * 60 * 1000);
+  candidates.sort((a, b) => {
+    if (windowScores.sampleSize > 0 && b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return a.date.getTime() - b.date.getTime();
+  });
+
+  return {
+    date: candidates[0]?.date || new Date(from.getTime() + 60 * 60 * 1000),
+    source: windowScores.sampleSize > 0 ? 'post_performance' : 'fallback',
+    sampleSize: windowScores.sampleSize,
+  };
+}
+
+function buildPostingWindowScores() {
+  const media = instagramInsightsStore.latest?.media || [];
+  const scoredMedia = media.filter((item) => (
+    Number.isFinite(Date.parse(item.timestamp))
+    && Number(item.metrics?.reach || 0) > 0
+  ));
+  const scores = new Map();
+
+  for (const windowTime of postingConfig.fallbackWindows) {
+    const nearby = scoredMedia.filter((item) => {
+      const hour = getHourInTimeZone(new Date(item.timestamp), postingConfig.timeZone);
+      return circularHourDistance(hour, windowTime.hour) <= 2;
+    });
+
+    if (nearby.length === 0) {
+      scores.set(windowTime.hour, 0);
+      continue;
+    }
+
+    const total = nearby.reduce((sum, item) => {
+      const reach = Number(item.metrics?.reach || 0);
+      const interactions = Number(item.metrics?.total_interactions || 0);
+      const engagementRate = reach > 0 ? interactions / reach : 0;
+      return sum + Math.log1p(reach) + engagementRate * 10;
+    }, 0);
+    scores.set(windowTime.hour, total / nearby.length);
+  }
+
+  return { scores, sampleSize: scoredMedia.length };
+}
+
+function getHourInTimeZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  return Number(parts.find((part) => part.type === 'hour')?.value || 0);
+}
+
+function getDatePartsInTimeZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  };
+}
+
+function zonedDateTimeToUtc(parts, timeZone) {
+  const targetAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, 0);
+  let result = new Date(targetAsUtc);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const represented = getDatePartsInTimeZone(result, timeZone);
+    const representedAsUtc = Date.UTC(
+      represented.year,
+      represented.month - 1,
+      represented.day,
+      represented.hour,
+      represented.minute,
+      0
+    );
+    result = new Date(result.getTime() + targetAsUtc - representedAsUtc);
+  }
+  return result;
+}
+
+function circularHourDistance(a, b) {
+  const distance = Math.abs(a - b);
+  return Math.min(distance, 24 - distance);
+}
+
+function formatPostingRecommendationSource(draft) {
+  if (draft.recommendationSource === 'post_performance') {
+    return `analytics (${draft.recommendationSampleSize || 0} post)`;
+  }
+  return 'configured fallback windows';
 }
 
 function parseScheduleCommand(text) {
@@ -2251,40 +2372,51 @@ function parseScheduleCommand(text) {
     return null;
   }
 
-  const date = new Date();
+  const nowParts = getDatePartsInTimeZone(new Date(), postingConfig.timeZone);
+  let year = nowParts.year;
+  let month = nowParts.month;
+  let day = nowParts.day;
   const explicitDate = value.match(/(\d{4})-(\d{2})-(\d{2})/);
 
   if (explicitDate) {
-    date.setFullYear(Number(explicitDate[1]), Number(explicitDate[2]) - 1, Number(explicitDate[3]));
+    year = Number(explicitDate[1]);
+    month = Number(explicitDate[2]);
+    day = Number(explicitDate[3]);
   } else if (value.includes('tomorrow')) {
-    date.setDate(date.getDate() + 1);
+    const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
+    year = tomorrow.getUTCFullYear();
+    month = tomorrow.getUTCMonth() + 1;
+    day = tomorrow.getUTCDate();
   } else if (!value.includes('today')) {
     return null;
   }
 
-  date.setHours(hour, minute, 0, 0);
-  return date;
+  return zonedDateTimeToUtc({ year, month, day, hour, minute }, postingConfig.timeZone);
 }
 
 function isAllowedPostingDate(date) {
-  return postingConfig.allowedDays.has(date.getDay());
+  const parts = getDatePartsInTimeZone(date, postingConfig.timeZone);
+  const day = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
+  return postingConfig.allowedDays.has(day);
 }
 
 function isWithinAllowedPostingHours(date) {
-  const minutes = date.getHours() * 60 + date.getMinutes();
+  const parts = getDatePartsInTimeZone(date, postingConfig.timeZone);
+  const minutes = parts.hour * 60 + parts.minute;
   return minutes >= postingConfig.allowedHours.startMinutes && minutes <= postingConfig.allowedHours.endMinutes;
 }
 
 function countScheduledPostsForDay(date) {
+  const candidateParts = getDatePartsInTimeZone(date, postingConfig.timeZone);
   return instagramStore.drafts.filter((draft) => {
     if (draft.status !== 'scheduled' || !draft.scheduledAt) {
       return false;
     }
 
-    const scheduled = new Date(draft.scheduledAt);
-    return scheduled.getFullYear() === date.getFullYear()
-      && scheduled.getMonth() === date.getMonth()
-      && scheduled.getDate() === date.getDate();
+    const scheduled = getDatePartsInTimeZone(new Date(draft.scheduledAt), postingConfig.timeZone);
+    return scheduled.year === candidateParts.year
+      && scheduled.month === candidateParts.month
+      && scheduled.day === candidateParts.day;
   }).length;
 }
 
