@@ -17,9 +17,11 @@ function createContentStrategyState(mode = 'shadow') {
     plans: [],
     strategyRevision: {
       updatedAt: null,
-      summary: 'Initial 3 product + 2 educational/carousel mix.',
-      productShare: 60,
+      summary: 'Growth test: 1 product, 2 education, 1 branding, 1 trend/engagement.',
+      productShare: 20,
       educationShare: 40,
+      brandingShare: 20,
+      trendShare: 20,
       confidence: 'insufficient_data',
     },
   };
@@ -119,9 +121,9 @@ function normalizeWeeklyPlan(raw, context = {}) {
     throw new Error('Content plan must contain exactly five items.');
   }
   const normalized = items.map((item, index) => normalizePlanItem(item, index));
-  const productCount = normalized.filter((item) => item.pillar === 'product').length;
-  if (productCount !== 3) {
-    throw new Error('Content plan must contain exactly three product items.');
+  const counts = countPillars(normalized);
+  if (counts.product !== 1 || counts.education !== 2 || counts.branding !== 1 || counts.trend !== 1) {
+    throw new Error('Content plan must contain 1 product, 2 education, 1 branding, and 1 trend item.');
   }
   return {
     id: crypto.randomUUID(),
@@ -141,7 +143,10 @@ function normalizeWeeklyPlan(raw, context = {}) {
 }
 
 function normalizePlanItem(item, index) {
-  const pillar = String(item.pillar || '').toLowerCase() === 'product' ? 'product' : 'education';
+  const requestedPillar = String(item.pillar || '').toLowerCase();
+  const pillar = ['product', 'education', 'branding', 'trend'].includes(requestedPillar)
+    ? requestedPillar
+    : 'education';
   const format = String(item.format || '').toLowerCase() === 'carousel' ? 'carousel' : 'image';
   return {
     id: item.id || `item-${index + 1}`,
@@ -164,6 +169,13 @@ function normalizePlanItem(item, index) {
     publishResult: null,
     error: '',
   };
+}
+
+function countPillars(items) {
+  return items.reduce((counts, item) => {
+    counts[item.pillar] = (counts[item.pillar] || 0) + 1;
+    return counts;
+  }, { product: 0, education: 0, branding: 0, trend: 0 });
 }
 
 function uniqueHandles(values) {

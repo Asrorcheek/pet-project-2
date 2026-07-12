@@ -5,7 +5,7 @@
 - Market: Uzbekistan tech retail, centered on Tashkent.
 - Languages: Uzbek primary, Russian when useful for the audience.
 - Cadence: five items per week.
-- Mix: three product/value posts and two educational/comparison/FAQ/trend carousels.
+- Growth-test mix: one product/value post, two educational/expert carousels, one branding/trust post, and one trend/engagement post.
 - Weekly review: Sunday at 18:00 Asia/Tashkent.
 - Primary KPI: reach and follower growth.
 - Adaptation: weekly; change any pillar allocation by at most 20 percentage points.

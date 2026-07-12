@@ -11,7 +11,7 @@ Build an evidence-backed weekly feedback loop. Read [references/strategy-policy.
 
 1. Load active products from the configured Google Sheets CSV catalog.
 2. Load owned Instagram insights, approved competitor observations, global research, prior experiments, and the current strategy revision.
-3. Produce exactly five weekly items: three product/value posts and two educational, comparison, FAQ, or trend carousels.
+3. Produce exactly five weekly items: one product/value post, two educational/expert carousels, one branding/trust post, and one trend/engagement post.
 4. Give every item a goal, pillar, hook, caption, CTA, evidence, public media URLs or a media brief, scheduled time, expected KPI, and experiment ID.
 5. Send the complete plan to Telegram for one weekly approval.
 6. Never publish an unapproved plan or an item outside its approved scope.

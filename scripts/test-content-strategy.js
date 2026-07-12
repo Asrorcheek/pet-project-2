@@ -25,15 +25,18 @@ assert.deepStrictEqual(normalizeContentStrategyState({ mode: 'invalid' }, 'shado
 const plan = normalizeWeeklyPlan({
   items: [
     { pillar: 'product', title: 'A', sku: 'A1' },
-    { pillar: 'product', title: 'B', sku: 'B1' },
-    { pillar: 'product', title: 'C', sku: 'C1' },
-    { pillar: 'education', format: 'carousel', title: 'D' },
-    { pillar: 'education', format: 'carousel', title: 'E' },
+    { pillar: 'education', format: 'carousel', title: 'B' },
+    { pillar: 'education', format: 'carousel', title: 'C' },
+    { pillar: 'branding', title: 'D' },
+    { pillar: 'trend', title: 'E' },
   ],
 }, { weekKey: '2026-07-20', chatId: '1', mode: 'shadow' });
 
 assert.strictEqual(plan.items.length, 5);
-assert.strictEqual(plan.items.filter((item) => item.pillar === 'product').length, 3);
+assert.strictEqual(plan.items.filter((item) => item.pillar === 'product').length, 1);
+assert.strictEqual(plan.items.filter((item) => item.pillar === 'education').length, 2);
+assert.strictEqual(plan.items.filter((item) => item.pillar === 'branding').length, 1);
+assert.strictEqual(plan.items.filter((item) => item.pillar === 'trend').length, 1);
 assert.throws(() => normalizeWeeklyPlan({ items: plan.items.slice(0, 4) }), /exactly five/);
 
 console.log('content-strategy tests passed');

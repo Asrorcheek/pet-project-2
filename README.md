@@ -149,7 +149,7 @@ Snapshots are stored in `data/instagram-insights.json` and refreshed in the back
 
 ## Adaptive Content Strategy Agent
 
-The content agent uses a published Google Sheets CSV catalog, owned Instagram insights, approved public competitor handles, and public global research to create a five-item weekly plan. The fixed initial mix is three product/value items and two educational/comparison/FAQ/trend items. Sunday at 18:00 `Asia/Tashkent` is the default review time.
+The content agent uses a published Google Sheets CSV catalog, owned Instagram insights, approved public competitor handles, and public global research to create a five-item weekly plan. The current growth-test mix is one product/value post, two educational/expert carousels, one branding/trust post, and one trend/engagement post. Sunday at 18:00 `Asia/Tashkent` is the default review time.
 
 Commands:
 
