@@ -10,7 +10,7 @@
 - Primary KPI: reach and follower growth.
 - Adaptation: weekly; change any pillar allocation by at most 20 percentage points.
 - Competitors: owner-provided seeds plus agent suggestions that require approval.
-- Catalog: Google Sheets CSV is the source of truth for product facts.
+- Catalog: Google Sheets CSV is the long-term source of truth; a versioned local CSV export may be used for shadow-mode testing.
 
 ## Required catalog columns
 

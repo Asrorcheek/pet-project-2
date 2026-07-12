@@ -171,7 +171,7 @@ Commands:
 
 `shadow` is the safe default and never publishes plan items. `approval` requires weekly approval and item-level approval. `auto` publishes only due items inside an approved weekly plan. Missing captions or public media URLs block an item instead of creating substitute content. All content state is persisted in `data/content-strategy.json` for restart-safe, idempotent processing.
 
-Publish the catalog sheet as CSV and set `CONTENT_CATALOG_CSV_URL`. Required logical columns are `sku`, `name`, `price`, `specs`, `availability`, `active`, `image_urls`, `priority`, and `updated_at`. The bot accepts common case-insensitive aliases. Product facts are never invented from missing cells.
+Publish the catalog sheet as CSV and set `CONTENT_CATALOG_CSV_URL`, or place a local export at `CONTENT_CATALOG_FILE` (default: `data/content-catalog.csv`). Google Sheets takes precedence when both are configured. Required logical columns are `sku`, `name`, `price`, `specs`, `availability`, `active`, `image_urls`, `priority`, and `updated_at`. The bot accepts common case-insensitive aliases. Product facts are never invented from missing cells.
 
 ## Hermes Agent API
 

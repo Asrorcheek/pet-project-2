@@ -78,6 +78,7 @@ const contentPlanReviewDay = parseNonNegativeInt(process.env.CONTENT_PLAN_REVIEW
 const contentPlanReviewHour = Math.min(parseNonNegativeInt(process.env.CONTENT_PLAN_REVIEW_HOUR, 18), 23);
 const contentPlanReviewMinute = Math.min(parseNonNegativeInt(process.env.CONTENT_PLAN_REVIEW_MINUTE, 0), 59);
 const contentCatalogCsvUrl = normalizeText(process.env.CONTENT_CATALOG_CSV_URL);
+const contentCatalogFile = process.env.CONTENT_CATALOG_FILE || path.join('data', 'content-catalog.csv');
 const contentStrategyOwnerChatId = normalizeText(process.env.CONTENT_STRATEGY_OWNER_CHAT_ID);
 const hermesPythonBin = process.env.HERMES_PYTHON_BIN
   || path.join(process.env.HOME || '', '.hermes', 'hermes-agent', 'venv', 'bin', 'python');
@@ -1174,18 +1175,25 @@ function storeContentPlanObservations(plan) {
 }
 
 async function loadContentCatalog() {
-  if (!contentCatalogCsvUrl) {
-    throw new UserVisibleError('CONTENT_CATALOG_CSV_URL hali sozlanmagan. Google Sheets CSV publish URL kerak.');
+  if (contentCatalogCsvUrl) {
+    const response = await fetchWithTimeout(contentCatalogCsvUrl, {
+      headers: { Accept: 'text/csv,text/plain' },
+    }, 30000);
+    if (!response.ok) {
+      throw new Error(`Google Sheets catalog HTTP ${response.status}`);
+    }
+    return parseCatalogCsv(await response.text())
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, 500);
   }
-  const response = await fetchWithTimeout(contentCatalogCsvUrl, {
-    headers: { Accept: 'text/csv,text/plain' },
-  }, 30000);
-  if (!response.ok) {
-    throw new Error(`Google Sheets catalog HTTP ${response.status}`);
+
+  const filePath = resolveProjectPath(contentCatalogFile);
+  if (!fs.existsSync(filePath)) {
+    throw new UserVisibleError('Content katalog topilmadi. CONTENT_CATALOG_CSV_URL yoki CONTENT_CATALOG_FILE kerak.');
   }
-  return parseCatalogCsv(await response.text())
+  return parseCatalogCsv(fs.readFileSync(filePath, 'utf8'))
     .sort((a, b) => b.priority - a.priority)
-    .slice(0, 50);
+    .slice(0, 500);
 }
 
 function buildContentStrategyPrompt(catalog, weekKey) {
@@ -1376,7 +1384,7 @@ function formatContentStrategyStatus() {
     'Content Strategy Agent',
     `Mode: ${contentStrategyStore.mode}`,
     `Paused: ${contentStrategyStore.paused ? 'yes' : 'no'}`,
-    `Catalog: ${contentCatalogCsvUrl ? 'configured' : 'missing'}`,
+    `Catalog: ${getContentCatalogSourceLabel()}`,
     `Current plan: ${current ? `${current.weekKey} (${current.status})` : 'none'}`,
     `Approved competitors: ${contentStrategyStore.approvedCompetitors.length}`,
     `Plans stored: ${contentStrategyStore.plans.length}`,
@@ -1414,7 +1422,7 @@ async function processContentStrategy() {
 }
 
 function shouldGenerateScheduledContentPlan() {
-  if (!contentCatalogCsvUrl || !getContentStrategyOwnerChatId()) return false;
+  if (!hasContentCatalog() || !getContentStrategyOwnerChatId()) return false;
   const parts = getDatePartsInTimeZone(new Date(), postingConfig.timeZone);
   const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
   if (weekday !== contentPlanReviewDay || parts.hour !== contentPlanReviewHour || parts.minute < contentPlanReviewMinute) {
@@ -1426,6 +1434,16 @@ function shouldGenerateScheduledContentPlan() {
 
 function getContentStrategyOwnerChatId() {
   return contentStrategyOwnerChatId || normalizeText(contentStrategyStore.ownerChatId);
+}
+
+function hasContentCatalog() {
+  return Boolean(contentCatalogCsvUrl) || fs.existsSync(resolveProjectPath(contentCatalogFile));
+}
+
+function getContentCatalogSourceLabel() {
+  if (contentCatalogCsvUrl) return 'google-sheets';
+  if (fs.existsSync(resolveProjectPath(contentCatalogFile))) return 'local-csv';
+  return 'missing';
 }
 
 async function processApprovedContentPlanItems() {
