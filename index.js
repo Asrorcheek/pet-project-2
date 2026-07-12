@@ -1068,6 +1068,8 @@ function logInstagramInsightsError(error) {
 async function handleContentPlanCommand(msg) {
   try {
     await withChatAction(msg.chat.id, 'typing', async () => {
+      contentStrategyStore.ownerChatId = String(msg.chat.id);
+      saveContentStrategyStore();
       const current = getCurrentContentPlan();
       if (
         current
@@ -1088,6 +1090,7 @@ async function handleContentPlanCommand(msg) {
 }
 
 async function generateWeeklyContentPlan(chatId) {
+  contentStrategyStore.ownerChatId = String(chatId);
   const catalog = await loadContentCatalog();
   if (catalog.length < 3) {
     throw new UserVisibleError('Google Sheets katalogida kamida 3 ta active mahsulot bo`lishi kerak.');
@@ -1400,8 +1403,9 @@ async function processContentStrategy() {
   contentStrategyRunning = true;
   try {
     if (shouldGenerateScheduledContentPlan()) {
-      const plan = await generateWeeklyContentPlan(contentStrategyOwnerChatId);
-      await sendLongMessage(contentStrategyOwnerChatId, formatContentPlan(plan));
+      const ownerChatId = getContentStrategyOwnerChatId();
+      const plan = await generateWeeklyContentPlan(ownerChatId);
+      await sendLongMessage(ownerChatId, formatContentPlan(plan));
     }
     await processApprovedContentPlanItems();
   } finally {
@@ -1410,7 +1414,7 @@ async function processContentStrategy() {
 }
 
 function shouldGenerateScheduledContentPlan() {
-  if (!contentCatalogCsvUrl || !contentStrategyOwnerChatId) return false;
+  if (!contentCatalogCsvUrl || !getContentStrategyOwnerChatId()) return false;
   const parts = getDatePartsInTimeZone(new Date(), postingConfig.timeZone);
   const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
   if (weekday !== contentPlanReviewDay || parts.hour !== contentPlanReviewHour || parts.minute < contentPlanReviewMinute) {
@@ -1418,6 +1422,10 @@ function shouldGenerateScheduledContentPlan() {
   }
   const weekKey = getNextContentWeekKey(new Date());
   return !contentStrategyStore.plans.some((plan) => plan.weekKey === weekKey);
+}
+
+function getContentStrategyOwnerChatId() {
+  return contentStrategyOwnerChatId || normalizeText(contentStrategyStore.ownerChatId);
 }
 
 async function processApprovedContentPlanItems() {

@@ -8,6 +8,7 @@ function createContentStrategyState(mode = 'shadow') {
   return {
     version: 1,
     paused: false,
+    ownerChatId: null,
     mode: CONTENT_MODES.has(mode) ? mode : 'shadow',
     approvedCompetitors: [],
     pendingCompetitors: [],
