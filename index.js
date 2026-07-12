@@ -6,6 +6,13 @@ const fs = require('fs');
 const path = require('path');
 const { promisify } = require('util');
 const TelegramBot = require('node-telegram-bot-api');
+const {
+  CONTENT_MODES,
+  normalizeContentStrategyState,
+  normalizeWeeklyPlan,
+  parseCatalogCsv,
+  uniqueHandles,
+} = require('./content-strategy');
 
 const TELEGRAM_LIMIT = 4096;
 const DEFAULT_HERMES_API_BASE = 'http://127.0.0.1:8642/v1';
@@ -20,6 +27,7 @@ const DEFAULT_META_API_VERSION = 'v25.0';
 const DEFAULT_INSTAGRAM_POST_STORE_FILE = path.join('data', 'instagram-posts.json');
 const DEFAULT_INSTAGRAM_INSIGHTS_STORE_FILE = path.join('data', 'instagram-insights.json');
 const DEFAULT_MEETING_STORE_FILE = path.join('data', 'meetings.json');
+const DEFAULT_CONTENT_STRATEGY_STORE_FILE = path.join('data', 'content-strategy.json');
 const execFileAsync = promisify(execFile);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -63,6 +71,14 @@ const instagramInsightsRefreshMs = parsePositiveInt(
   process.env.INSTAGRAM_INSIGHTS_REFRESH_MINUTES,
   360
 ) * 60 * 1000;
+const contentStrategyStoreFile = process.env.CONTENT_STRATEGY_STORE_FILE
+  || DEFAULT_CONTENT_STRATEGY_STORE_FILE;
+const contentStrategyDefaultMode = normalizeContentMode(process.env.CONTENT_STRATEGY_MODE || 'shadow');
+const contentPlanReviewDay = parseNonNegativeInt(process.env.CONTENT_PLAN_REVIEW_DAY, 0) % 7;
+const contentPlanReviewHour = Math.min(parseNonNegativeInt(process.env.CONTENT_PLAN_REVIEW_HOUR, 18), 23);
+const contentPlanReviewMinute = Math.min(parseNonNegativeInt(process.env.CONTENT_PLAN_REVIEW_MINUTE, 0), 59);
+const contentCatalogCsvUrl = normalizeText(process.env.CONTENT_CATALOG_CSV_URL);
+const contentStrategyOwnerChatId = normalizeText(process.env.CONTENT_STRATEGY_OWNER_CHAT_ID);
 const hermesPythonBin = process.env.HERMES_PYTHON_BIN
   || path.join(process.env.HOME || '', '.hermes', 'hermes-agent', 'venv', 'bin', 'python');
 const storeProfile = {
@@ -86,7 +102,9 @@ let googleTokenCache = null;
 let instagramStore = loadInstagramStore();
 let instagramInsightsStore = loadInstagramInsightsStore();
 let meetingStore = loadMeetingStore();
+let contentStrategyStore = loadContentStrategyStore();
 let recordingPollRunning = false;
+let contentStrategyRunning = false;
 const instagramSessions = restoreInstagramSessions(instagramStore);
 const mentorSessions = new Set();
 
@@ -149,6 +167,13 @@ bot.onText(/\/help/, async (msg) => {
       '/meet kompaniya, sana va vaqt - 30 daqiqalik Google Meet yaratish',
       '/post product model - Instagram product post draft yaratish',
       '/analytics [7|30] - Instagram post natijalari hisoboti',
+      '/contentplan - haftalik content plan yaratish/ko`rsatish',
+      '/approveplan - joriy haftalik planni tasdiqlash',
+      '/rejectplan sabab - planni rad etib qayta ishlash',
+      '/contentstatus - content agent holati',
+      '/contentreport - haftalik strategiya hisoboti',
+      '/pausecontent | /resumecontent - emergency stop',
+      '/competitors | /competitor add username',
       '/cancelpost - aktiv Instagram post draftni bekor qilish',
       'Ovozli xabar - Google Calendar event va Google Meet havolasini yaratish',
     ].join('\n')
@@ -208,6 +233,65 @@ bot.onText(/^\/analytics(?:@\w+)?(?:\s+(7|30))?$/i, async (msg, match) => {
   }
 
   await sendInstagramAnalyticsReport(msg.chat.id, Number(match?.[1] || 30));
+});
+
+bot.onText(/^\/contentplan(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await handleContentPlanCommand(msg);
+});
+
+bot.onText(/^\/approveplan(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await approveCurrentContentPlan(msg);
+});
+
+bot.onText(/^\/rejectplan(?:@\w+)?(?:\s+([\s\S]+))?$/i, async (msg, match) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await rejectCurrentContentPlan(msg, match?.[1]);
+});
+
+bot.onText(/^\/approveitem(?:@\w+)?\s+(item-[1-5])$/i, async (msg, match) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await approveContentPlanItem(msg, match[1].toLowerCase());
+});
+
+bot.onText(/^\/pausecontent(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  contentStrategyStore.paused = true;
+  saveContentStrategyStore();
+  await bot.sendMessage(msg.chat.id, 'Content agent pause qilindi. Hech qanday plan item publish qilinmaydi.');
+});
+
+bot.onText(/^\/resumecontent(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  contentStrategyStore.paused = false;
+  saveContentStrategyStore();
+  await bot.sendMessage(msg.chat.id, `Content agent davom etdi. Mode: ${contentStrategyStore.mode}.`);
+});
+
+bot.onText(/^\/contentstatus(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await bot.sendMessage(msg.chat.id, formatContentStrategyStatus());
+});
+
+bot.onText(/^\/contentreport(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await bot.sendMessage(msg.chat.id, formatContentStrategyReport());
+});
+
+bot.onText(/^\/contentmode(?:@\w+)?(?:\s+(shadow|approval|auto))?$/i, async (msg, match) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await handleContentModeCommand(msg, match?.[1]);
+});
+
+bot.onText(/^\/competitors(?:@\w+)?$/i, async (msg) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await bot.sendMessage(msg.chat.id, formatCompetitorList());
+});
+
+bot.onText(/^\/competitor(?:@\w+)?\s+(add|approve|remove)\s+@?([a-z0-9._]{1,30})$/i, async (msg, match) => {
+  if (!isAllowed(msg.from)) return denyAccess(msg.chat.id);
+  await handleCompetitorCommand(msg, match[1].toLowerCase(), match[2].toLowerCase());
 });
 
 bot.on('message', async (msg) => {
@@ -355,6 +439,14 @@ setInterval(() => {
 processDueInstagramPosts().catch((error) => {
   console.error('Instagram scheduler startup failed:', redactAccessToken(error.message || String(error)));
 });
+setInterval(() => {
+  processContentStrategy().catch((error) => {
+    console.error('Content strategy scheduler failed:', redactAccessToken(error.message || String(error)));
+  });
+}, 60000);
+setTimeout(() => processContentStrategy().catch((error) => {
+  console.error('Content strategy startup failed:', redactAccessToken(error.message || String(error)));
+}), 30000);
 
 function isAllowed(user) {
   if (allowedUserIds.size === 0) {
@@ -971,6 +1063,457 @@ function calculateInstagramEngagementRate(metrics) {
 
 function logInstagramInsightsError(error) {
   console.error('Instagram insights refresh failed:', redactAccessToken(error.message || String(error)));
+}
+
+async function handleContentPlanCommand(msg) {
+  try {
+    await withChatAction(msg.chat.id, 'typing', async () => {
+      const current = getCurrentContentPlan();
+      if (
+        current
+        && current.modeAtCreation === contentStrategyStore.mode
+        && ['pending_approval', 'approved'].includes(current.status)
+      ) {
+        await sendLongMessage(msg.chat.id, formatContentPlan(current));
+        return;
+      }
+      const plan = await generateWeeklyContentPlan(msg.chat.id);
+      await sendLongMessage(msg.chat.id, formatContentPlan(plan));
+    });
+  } catch (error) {
+    const message = redactAccessToken(error.message || String(error));
+    console.error('Content plan generation failed:', message);
+    await bot.sendMessage(msg.chat.id, `Content plan yaratilmadi: ${message}`);
+  }
+}
+
+async function generateWeeklyContentPlan(chatId) {
+  const catalog = await loadContentCatalog();
+  if (catalog.length < 3) {
+    throw new UserVisibleError('Google Sheets katalogida kamida 3 ta active mahsulot bo`lishi kerak.');
+  }
+
+  const weekKey = getNextContentWeekKey(new Date());
+  const prompt = buildContentStrategyPrompt(catalog, weekKey);
+  const answer = await askHermes(prompt, chatId, {
+    instructions: [
+      'Use the installed content-strategy-agent skill.',
+      'Research only public competitor and global sources with web_search when available.',
+      'Return only valid JSON. Do not include markdown.',
+      'Never invent product facts, prices, stock, metrics, or URLs.',
+    ].join(' '),
+    conversation: `telegram-${chatId}-content-plan-${weekKey}`,
+    store: true,
+  });
+  const parsed = parseJsonObject(answer);
+  if (!parsed) {
+    throw new Error('Hermes valid JSON content plan qaytarmadi.');
+  }
+  const plan = normalizeWeeklyPlan(parsed, {
+    weekKey,
+    chatId,
+    mode: contentStrategyStore.mode,
+  });
+  bindContentPlanToCatalog(plan, catalog);
+  applyDeterministicContentSchedule(plan);
+  contentStrategyStore.plans.push(plan);
+  contentStrategyStore.plans = contentStrategyStore.plans.slice(-26);
+  storeContentPlanObservations(plan);
+  contentStrategyStore.strategyRevision = {
+    ...contentStrategyStore.strategyRevision,
+    updatedAt: new Date().toISOString(),
+    summary: plan.strategyChanges.join(' ') || plan.researchSummary || contentStrategyStore.strategyRevision.summary,
+    confidence: (instagramInsightsStore.history || []).length >= 4 ? 'medium' : 'insufficient_data',
+  };
+  saveContentStrategyStore();
+  return plan;
+}
+
+function bindContentPlanToCatalog(plan, catalog) {
+  const bySku = new Map(catalog.filter((product) => product.sku).map((product) => [product.sku.toLowerCase(), product]));
+  const byName = new Map(catalog.map((product) => [product.name.toLowerCase(), product]));
+  for (const item of plan.items.filter((entry) => entry.pillar === 'product')) {
+    const product = bySku.get(item.sku.toLowerCase()) || byName.get(item.title.toLowerCase());
+    if (!product) {
+      throw new Error(`Product plan item katalogga bog‘lanmagan: ${item.title || item.id}`);
+    }
+    item.sku = product.sku;
+    item.catalogProduct = {
+      name: product.name,
+      price: product.price,
+      specs: product.specs,
+      availability: product.availability,
+      updatedAt: product.updatedAt,
+    };
+    item.mediaUrls = product.imageUrls.slice(0, item.format === 'carousel' ? 10 : 1);
+    if (!product.price) {
+      item.status = 'blocked';
+      item.error = 'Catalog price is missing.';
+    }
+  }
+}
+
+function storeContentPlanObservations(plan) {
+  for (const item of plan.items) {
+    for (const evidence of item.evidence || []) {
+      if (!evidence || typeof evidence !== 'object' || !isPublicHttpUrl(evidence.url)) continue;
+      contentStrategyStore.observations.push({
+        observedAt: new Date().toISOString(),
+        planId: plan.id,
+        itemId: item.id,
+        url: evidence.url,
+        sourceType: normalizeText(evidence.type) || 'global',
+        note: truncateText(evidence.note || '', 500),
+      });
+    }
+  }
+  contentStrategyStore.observations = contentStrategyStore.observations.slice(-1000);
+}
+
+async function loadContentCatalog() {
+  if (!contentCatalogCsvUrl) {
+    throw new UserVisibleError('CONTENT_CATALOG_CSV_URL hali sozlanmagan. Google Sheets CSV publish URL kerak.');
+  }
+  const response = await fetchWithTimeout(contentCatalogCsvUrl, {
+    headers: { Accept: 'text/csv,text/plain' },
+  }, 30000);
+  if (!response.ok) {
+    throw new Error(`Google Sheets catalog HTTP ${response.status}`);
+  }
+  return parseCatalogCsv(await response.text())
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 50);
+}
+
+function buildContentStrategyPrompt(catalog, weekKey) {
+  const owned = instagramInsightsStore.latest;
+  return [
+    `Create the Instagram content plan for week ${weekKey}.`,
+    'Market: Uzbekistan computer/electronics retail. Uzbek primary; Russian only when useful.',
+    'Primary KPI: reach and follower growth. Return exactly 5 items: exactly 3 product and 2 education.',
+    'Formats allowed: image or carousel. Do not propose Reels.',
+    'Use catalog image URLs when they match. For educational carousels without ready media, provide a media_brief and leave media_urls empty.',
+    'Use ISO-8601 scheduled_at values, but the deterministic scheduler may normalize them.',
+    '',
+    'Return only JSON:',
+    '{"research_summary":"...","strategy_changes":["..."],"items":[{"pillar":"product|education","format":"image|carousel","goal":"...","title":"...","hook":"...","caption":"...","cta":"...","sku":"...","media_urls":["https://...jpg"],"media_brief":"...","scheduled_at":"ISO","expected_kpi":"reach","experiment_id":"...","evidence":[{"url":"...","type":"owned|competitor|global","note":"..."}]}]}',
+    '',
+    'Approved competitors:',
+    JSON.stringify(contentStrategyStore.approvedCompetitors),
+    'Owned analytics:',
+    JSON.stringify(summarizeOwnedInsightsForStrategy(owned)),
+    'Current strategy revision:',
+    JSON.stringify(contentStrategyStore.strategyRevision),
+    'Active catalog:',
+    JSON.stringify(catalog),
+  ].join('\n');
+}
+
+function summarizeOwnedInsightsForStrategy(snapshot) {
+  if (!snapshot) return { status: 'insufficient_data' };
+  return {
+    collectedAt: snapshot.collectedAt,
+    followers: snapshot.account?.followersCount || 0,
+    media: (snapshot.media || []).map((item) => ({
+      mediaType: item.mediaProductType || item.mediaType,
+      timestamp: item.timestamp,
+      metrics: item.metrics,
+      captionOpening: normalizeText(item.caption).split('\n')[0].slice(0, 120),
+      permalink: item.permalink,
+    })),
+  };
+}
+
+function applyDeterministicContentSchedule(plan) {
+  const [year, month, day] = plan.weekKey.split('-').map(Number);
+  const slots = [
+    { offset: 0, hour: 19 },
+    { offset: 1, hour: 19 },
+    { offset: 2, hour: 19 },
+    { offset: 4, hour: 19 },
+    { offset: 6, hour: 19 },
+  ];
+  plan.items.forEach((item, index) => {
+    const localDay = new Date(Date.UTC(year, month - 1, day + slots[index].offset));
+    item.scheduledAt = zonedDateTimeToUtc({
+      year: localDay.getUTCFullYear(),
+      month: localDay.getUTCMonth() + 1,
+      day: localDay.getUTCDate(),
+      hour: slots[index].hour,
+      minute: 0,
+    }, postingConfig.timeZone).toISOString();
+  });
+}
+
+async function approveCurrentContentPlan(msg) {
+  const plan = getCurrentContentPlan();
+  if (!plan || plan.status !== 'pending_approval') {
+    await bot.sendMessage(msg.chat.id, 'Tasdiqlash uchun pending content plan yo`q.');
+    return;
+  }
+  plan.status = 'approved';
+  plan.approvedAt = new Date().toISOString();
+  plan.approvedBy = msg.from?.id;
+  if (contentStrategyStore.mode === 'approval') {
+    plan.items.forEach((item) => { item.status = 'waiting_item_approval'; });
+  }
+  saveContentStrategyStore();
+  const behavior = contentStrategyStore.mode === 'auto'
+    ? 'Plan itemlari vaqti kelganda avtomatik publish qilinadi.'
+    : contentStrategyStore.mode === 'approval'
+      ? 'Har item uchun /approveitem item-N kerak.'
+      : 'Shadow mode: publish qilinmaydi, faqat kuzatuv va hisobot.';
+  await bot.sendMessage(msg.chat.id, `Content plan tasdiqlandi. ${behavior}`);
+}
+
+async function rejectCurrentContentPlan(msg, reason) {
+  const plan = getCurrentContentPlan();
+  if (!plan || plan.status !== 'pending_approval') {
+    await bot.sendMessage(msg.chat.id, 'Rad etish uchun pending content plan yo`q.');
+    return;
+  }
+  plan.status = 'rejected';
+  plan.rejectedAt = new Date().toISOString();
+  plan.rejectionReason = normalizeText(reason) || 'Owner rejected the plan.';
+  saveContentStrategyStore();
+  await bot.sendMessage(msg.chat.id, 'Plan rad etildi. /contentplan yangi reja yaratadi.');
+}
+
+async function approveContentPlanItem(msg, itemId) {
+  const plan = getCurrentContentPlan();
+  const item = plan?.items.find((entry) => entry.id === itemId);
+  if (!plan || plan.status !== 'approved' || !item || item.status !== 'waiting_item_approval') {
+    await bot.sendMessage(msg.chat.id, 'Tasdiqlash uchun mos content item topilmadi.');
+    return;
+  }
+  item.status = 'planned';
+  saveContentStrategyStore();
+  await bot.sendMessage(msg.chat.id, `${itemId} tasdiqlandi va scheduled holatga o‘tdi.`);
+}
+
+async function handleContentModeCommand(msg, requestedMode) {
+  if (!requestedMode) {
+    await bot.sendMessage(msg.chat.id, `Current content mode: ${contentStrategyStore.mode}`);
+    return;
+  }
+  const mode = normalizeContentMode(requestedMode);
+  if (mode === 'approval' && !hasApprovedPlanForMode('shadow')) {
+    await bot.sendMessage(msg.chat.id, 'Approval mode uchun avval shadow mode’da kamida bitta haftalik plan tasdiqlanishi kerak.');
+    return;
+  }
+  if (mode === 'auto' && !hasApprovedPlanForMode('approval')) {
+    await bot.sendMessage(msg.chat.id, 'Auto mode uchun avval approval mode’da kamida bitta haftalik plan tasdiqlanishi kerak.');
+    return;
+  }
+  contentStrategyStore.mode = mode;
+  saveContentStrategyStore();
+  await bot.sendMessage(msg.chat.id, `Content mode: ${mode}.`);
+}
+
+function hasApprovedPlanForMode(mode) {
+  return contentStrategyStore.plans.some((plan) => (
+    plan.modeAtCreation === mode && ['approved', 'completed'].includes(plan.status)
+  ));
+}
+
+async function handleCompetitorCommand(msg, action, handle) {
+  const approved = new Set(contentStrategyStore.approvedCompetitors);
+  const pending = new Set(contentStrategyStore.pendingCompetitors);
+  if (action === 'add') pending.add(handle);
+  if (action === 'approve') {
+    pending.delete(handle);
+    approved.add(handle);
+  }
+  if (action === 'remove') {
+    pending.delete(handle);
+    approved.delete(handle);
+  }
+  contentStrategyStore.approvedCompetitors = uniqueHandles([...approved]);
+  contentStrategyStore.pendingCompetitors = uniqueHandles([...pending]);
+  saveContentStrategyStore();
+  await bot.sendMessage(msg.chat.id, formatCompetitorList());
+}
+
+function formatCompetitorList() {
+  return [
+    'Content competitors:',
+    `Approved: ${contentStrategyStore.approvedCompetitors.map((item) => `@${item}`).join(', ') || 'none'}`,
+    `Pending: ${contentStrategyStore.pendingCompetitors.map((item) => `@${item}`).join(', ') || 'none'}`,
+  ].join('\n');
+}
+
+function getCurrentContentPlan() {
+  return [...contentStrategyStore.plans].reverse().find((plan) => (
+    ['pending_approval', 'approved'].includes(plan.status)
+  )) || null;
+}
+
+function formatContentPlan(plan) {
+  return [
+    `Content plan: ${plan.weekKey}`,
+    `Status: ${plan.status} | Mode: ${contentStrategyStore.mode}`,
+    plan.researchSummary ? `Research: ${plan.researchSummary}` : '',
+    '',
+    ...plan.items.map((item, index) => [
+      `${index + 1}. [${item.pillar}/${item.format}] ${item.title}`,
+      `Hook: ${item.hook}`,
+      `CTA: ${item.cta}`,
+      `Time: ${formatScheduledAt(new Date(item.scheduledAt))}`,
+      `Media: ${item.mediaUrls.length ? `${item.mediaUrls.length} URL` : `brief required — ${item.mediaBrief}`}`,
+      `KPI: ${item.expectedKpi} | Experiment: ${item.experimentId || 'none'}`,
+    ].filter(Boolean).join('\n')),
+    '',
+    plan.status === 'pending_approval' ? 'Commands: /approveplan or /rejectplan sabab' : '',
+  ].filter(Boolean).join('\n\n');
+}
+
+function formatContentStrategyStatus() {
+  const current = getCurrentContentPlan();
+  return [
+    'Content Strategy Agent',
+    `Mode: ${contentStrategyStore.mode}`,
+    `Paused: ${contentStrategyStore.paused ? 'yes' : 'no'}`,
+    `Catalog: ${contentCatalogCsvUrl ? 'configured' : 'missing'}`,
+    `Current plan: ${current ? `${current.weekKey} (${current.status})` : 'none'}`,
+    `Approved competitors: ${contentStrategyStore.approvedCompetitors.length}`,
+    `Plans stored: ${contentStrategyStore.plans.length}`,
+  ].join('\n');
+}
+
+function formatContentStrategyReport() {
+  const latestPlan = contentStrategyStore.plans.at(-1);
+  const insights = instagramInsightsStore.latest;
+  return [
+    'Weekly content strategy report',
+    `Followers: ${insights?.account?.followersCount || 0}`,
+    `Current reach: ${sumInstagramMetric(insights?.media || [], 'reach')}`,
+    `Current views: ${sumInstagramMetric(insights?.media || [], 'views')}`,
+    `Last plan: ${latestPlan ? `${latestPlan.weekKey} (${latestPlan.status})` : 'none'}`,
+    `Strategy: ${contentStrategyStore.strategyRevision.summary}`,
+    `Confidence: ${contentStrategyStore.strategyRevision.confidence}`,
+    'Adaptation cap: 20 percentage points per week.',
+  ].join('\n');
+}
+
+async function processContentStrategy() {
+  if (contentStrategyRunning || contentStrategyStore.paused) return;
+  contentStrategyRunning = true;
+  try {
+    if (shouldGenerateScheduledContentPlan()) {
+      const plan = await generateWeeklyContentPlan(contentStrategyOwnerChatId);
+      await sendLongMessage(contentStrategyOwnerChatId, formatContentPlan(plan));
+    }
+    await processApprovedContentPlanItems();
+  } finally {
+    contentStrategyRunning = false;
+  }
+}
+
+function shouldGenerateScheduledContentPlan() {
+  if (!contentCatalogCsvUrl || !contentStrategyOwnerChatId) return false;
+  const parts = getDatePartsInTimeZone(new Date(), postingConfig.timeZone);
+  const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
+  if (weekday !== contentPlanReviewDay || parts.hour !== contentPlanReviewHour || parts.minute < contentPlanReviewMinute) {
+    return false;
+  }
+  const weekKey = getNextContentWeekKey(new Date());
+  return !contentStrategyStore.plans.some((plan) => plan.weekKey === weekKey);
+}
+
+async function processApprovedContentPlanItems() {
+  if (!['approval', 'auto'].includes(contentStrategyStore.mode)) return;
+  for (const plan of contentStrategyStore.plans.filter((item) => item.status === 'approved')) {
+    for (const item of plan.items.filter((entry) => entry.status === 'planned')) {
+      if (Date.parse(item.scheduledAt) > Date.now()) continue;
+      await publishContentPlanItem(plan, item);
+    }
+    if (plan.items.every((item) => ['published', 'blocked', 'failed'].includes(item.status))) {
+      plan.status = 'completed';
+      saveContentStrategyStore();
+    }
+  }
+}
+
+async function publishContentPlanItem(plan, item) {
+  if (item.publishResult?.mediaId || item.status === 'published') return;
+  if (!item.caption || item.mediaUrls.length === 0) {
+    item.status = 'blocked';
+    item.error = 'Caption or public media URL is missing.';
+    saveContentStrategyStore();
+    await bot.sendMessage(plan.chatId, `Content item ${item.id} blocked: ${item.error}`);
+    return;
+  }
+  try {
+    item.status = 'publishing';
+    saveContentStrategyStore();
+    const result = item.format === 'carousel'
+      ? await publishInstagramCarousel(item)
+      : await publishInstagramImageItem(item);
+    item.status = 'published';
+    item.publishResult = result;
+    item.publishedAt = new Date().toISOString();
+    saveContentStrategyStore();
+    await bot.sendMessage(plan.chatId, `Content item published: ${item.title}\n${result.permalink || result.mediaId}`);
+  } catch (error) {
+    item.status = 'failed';
+    item.error = redactAccessToken(error.message || String(error));
+    saveContentStrategyStore();
+    await bot.sendMessage(plan.chatId, `Content item ${item.id} failed: ${item.error}`);
+  }
+}
+
+async function publishInstagramImageItem(item) {
+  await verifyInstagramImageUrl(item.mediaUrls[0]);
+  const params = new URLSearchParams({
+    image_url: item.mediaUrls[0],
+    caption: item.caption,
+    access_token: instagramAccessToken,
+  });
+  const container = await fetchInstagramJson(`${instagramProfessionalAccountId}/media`, { method: 'POST', body: params });
+  await waitForInstagramContainer(container.id);
+  const published = await publishInstagramMediaContainer(container.id);
+  return finalizePublishedMedia(published.id || published.media_id);
+}
+
+async function publishInstagramCarousel(item) {
+  if (item.mediaUrls.length < 2 || item.mediaUrls.length > 10) {
+    throw new Error('Carousel requires 2 to 10 public JPEG URLs.');
+  }
+  const children = [];
+  for (const imageUrl of item.mediaUrls) {
+    await verifyInstagramImageUrl(imageUrl);
+    const params = new URLSearchParams({
+      image_url: imageUrl,
+      is_carousel_item: 'true',
+      access_token: instagramAccessToken,
+    });
+    const child = await fetchInstagramJson(`${instagramProfessionalAccountId}/media`, { method: 'POST', body: params });
+    await waitForInstagramContainer(child.id);
+    children.push(child.id);
+  }
+  const params = new URLSearchParams({
+    media_type: 'CAROUSEL',
+    children: children.join(','),
+    caption: item.caption,
+    access_token: instagramAccessToken,
+  });
+  const parent = await fetchInstagramJson(`${instagramProfessionalAccountId}/media`, { method: 'POST', body: params });
+  await waitForInstagramContainer(parent.id);
+  const published = await publishInstagramMediaContainer(parent.id);
+  return finalizePublishedMedia(published.id || published.media_id);
+}
+
+async function finalizePublishedMedia(mediaId) {
+  const permalink = mediaId ? await getInstagramMediaPermalink(mediaId).catch(() => '') : '';
+  return { mediaId, permalink };
+}
+
+function getNextContentWeekKey(from) {
+  const parts = getDatePartsInTimeZone(from, postingConfig.timeZone);
+  const current = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+  const daysUntilMonday = (8 - current.getUTCDay()) % 7 || 7;
+  current.setUTCDate(current.getUTCDate() + daysUntilMonday);
+  return current.toISOString().slice(0, 10);
 }
 
 async function cancelInstagramDraft(chatId, message) {
@@ -2100,6 +2643,27 @@ function saveMeetingStore() {
   fs.writeFileSync(filePath, `${JSON.stringify(meetingStore, null, 2)}\n`);
 }
 
+function loadContentStrategyStore() {
+  const filePath = resolveProjectPath(contentStrategyStoreFile);
+  try {
+    const data = fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, 'utf8')) : null;
+    const state = normalizeContentStrategyState(data, contentStrategyDefaultMode);
+    if (state.approvedCompetitors.length === 0 && process.env.CONTENT_COMPETITORS) {
+      state.approvedCompetitors = uniqueHandles(process.env.CONTENT_COMPETITORS.split(','));
+    }
+    return state;
+  } catch (error) {
+    console.warn(`Could not read content strategy store: ${error.message}`);
+    return normalizeContentStrategyState(null, contentStrategyDefaultMode);
+  }
+}
+
+function saveContentStrategyStore() {
+  const filePath = resolveProjectPath(contentStrategyStoreFile);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(contentStrategyStore, null, 2)}\n`);
+}
+
 function loadInstagramInsightsStore() {
   const filePath = resolveProjectPath(instagramInsightsStoreFile);
 
@@ -2961,6 +3525,16 @@ function isConfiguredValue(value) {
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseNonNegativeInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function normalizeContentMode(value) {
+  const mode = normalizeText(value).toLowerCase();
+  return CONTENT_MODES.has(mode) ? mode : 'shadow';
 }
 
 class UserVisibleError extends Error {}

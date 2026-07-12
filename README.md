@@ -147,6 +147,32 @@ Use `/analytics` for the last 30 days or `/analytics 7` for the last 7 days. The
 
 Snapshots are stored in `data/instagram-insights.json` and refreshed in the background every `INSTAGRAM_INSIGHTS_REFRESH_MINUTES` (default: 360). When the requested period has no posts, the report clearly falls back to all available media. Accounts with fewer than 100 followers use observed post performance instead of follower-active-time data.
 
+## Adaptive Content Strategy Agent
+
+The content agent uses a published Google Sheets CSV catalog, owned Instagram insights, approved public competitor handles, and public global research to create a five-item weekly plan. The fixed initial mix is three product/value items and two educational/comparison/FAQ/trend items. Sunday at 18:00 `Asia/Tashkent` is the default review time.
+
+Commands:
+
+```text
+/contentplan
+/approveplan
+/rejectplan reason
+/approveitem item-1
+/contentstatus
+/contentreport
+/pausecontent
+/resumecontent
+/contentmode shadow|approval|auto
+/competitors
+/competitor add username
+/competitor approve username
+/competitor remove username
+```
+
+`shadow` is the safe default and never publishes plan items. `approval` requires weekly approval and item-level approval. `auto` publishes only due items inside an approved weekly plan. Missing captions or public media URLs block an item instead of creating substitute content. All content state is persisted in `data/content-strategy.json` for restart-safe, idempotent processing.
+
+Publish the catalog sheet as CSV and set `CONTENT_CATALOG_CSV_URL`. Required logical columns are `sku`, `name`, `price`, `specs`, `availability`, `active`, `image_urls`, `priority`, and `updated_at`. The bot accepts common case-insensitive aliases. Product facts are never invented from missing cells.
+
 ## Hermes Agent API
 
 Install Hermes Agent:

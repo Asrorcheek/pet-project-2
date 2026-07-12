@@ -1,0 +1,4 @@
+interface:
+  display_name: "Content Strategy Agent"
+  short_description: "Adaptive Instagram content planning agent"
+  default_prompt: "Use $content-strategy-agent to create and adapt an approved weekly Instagram content plan."

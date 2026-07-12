@@ -8,7 +8,7 @@
     "check": "node --check index.js",
     "audit": "npm audit",
     "smoke:hermes": "node scripts/smoke-hermes.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node scripts/test-content-strategy.js"
   },
   "keywords": [],
   "author": "",
