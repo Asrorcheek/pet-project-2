@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { promisify } = require('util');
 const TelegramBot = require('node-telegram-bot-api');
+const { parseNaturalTelegramIntent } = require('./telegram-intent-router');
 const {
   CONTENT_MODES,
   normalizeContentStrategyState,
@@ -148,7 +149,7 @@ bot.onText(/\/start/, async (msg) => {
 
   await bot.sendMessage(
     msg.chat.id,
-    'Bot ishga tushdi. Matn yuboring, Google Meet uchun ovozli xabar yuboring, yoki Instagram post uchun /post ishlating.'
+    'Bot ishga tushdi. Oddiy matnda nima kerakligini yozing; slash-buyruqlar ham ishlashda davom etadi.'
   );
 });
 
@@ -177,6 +178,8 @@ bot.onText(/\/help/, async (msg) => {
       '/competitors | /competitor add username',
       '/cancelpost - aktiv Instagram post draftni bekor qilish',
       'Ovozli xabar - Google Calendar event va Google Meet havolasini yaratish',
+      '',
+      'Slash shart emas: masalan, "MacBook Air M2 8/256, $720 uchun Instagram post tayyorla".',
     ].join('\n')
   );
 });
@@ -324,8 +327,39 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  const naturalIntent = parseNaturalTelegramIntent(msg.text);
+  if (naturalIntent) {
+    await handleNaturalLanguageIntent(msg, naturalIntent);
+    return;
+  }
+
   await handleTextMessage(msg);
 });
+
+async function handleNaturalLanguageIntent(msg, intent) {
+  switch (intent.type) {
+    case 'instagram_post':
+      await handleInstagramPostCommand(msg, intent.productInput);
+      return;
+    case 'instagram_analytics':
+      await sendInstagramAnalyticsReport(msg.chat.id, intent.days);
+      return;
+    case 'content_plan':
+      await handleContentPlanCommand(msg);
+      return;
+    case 'content_status':
+      await bot.sendMessage(msg.chat.id, formatContentStrategyStatus());
+      return;
+    case 'content_report':
+      await bot.sendMessage(msg.chat.id, formatContentStrategyReport());
+      return;
+    case 'instagram_posts_status':
+      await sendInstagramPostStatus(msg.chat.id);
+      return;
+    default:
+      await handleTextMessage(msg);
+  }
+}
 
 async function handleTextMessage(msg) {
   try {
