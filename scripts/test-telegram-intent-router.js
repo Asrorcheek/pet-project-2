@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('assert');
-const { parseNaturalTelegramIntent } = require('../telegram-intent-router');
+const {
+  isInstagramDraftReply,
+  parseNaturalTelegramIntent,
+} = require('../telegram-intent-router');
 
 const cases = [
   [
@@ -44,6 +47,10 @@ const cases = [
     "Instagram postlar holatini ko'rsat",
     { type: 'instagram_posts_status' },
   ],
+  [
+    'Oxirgi post qaysi edi?',
+    { type: 'instagram_latest_post' },
+  ],
 ];
 
 for (const [input, expected] of cases) {
@@ -61,5 +68,30 @@ const passthroughCases = [
 for (const input of passthroughCases) {
   assert.strictEqual(parseNaturalTelegramIntent(input), null, input);
 }
+
+assert.strictEqual(isInstagramDraftReply({
+  status: 'waiting_for_image_approval',
+  text: 'Oxirgi post qaysi edi?',
+}), false);
+assert.strictEqual(isInstagramDraftReply({
+  status: 'waiting_for_image_approval',
+  text: '2',
+}), true);
+assert.strictEqual(isInstagramDraftReply({
+  status: 'waiting_for_image_url',
+  text: 'https://example.com/product.jpg',
+}), true);
+assert.strictEqual(isInstagramDraftReply({
+  status: 'waiting_for_price',
+  text: '$720',
+}), true);
+assert.strictEqual(isInstagramDraftReply({
+  status: 'waiting_for_final_approval',
+  text: 'post now',
+}), true);
+assert.strictEqual(isInstagramDraftReply({
+  status: 'waiting_for_final_approval',
+  text: "Oxirgi 7 kunlik analitikani ko'rsat",
+}), false);
 
 console.log('telegram intent router tests passed');

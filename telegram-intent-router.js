@@ -69,11 +69,48 @@ function parseNaturalTelegramIntent(text) {
     return { type: 'content_report' };
   }
 
+  if (isLatestInstagramPostRequest(comparable)) {
+    return { type: 'instagram_latest_post' };
+  }
+
   if (isInstagramPostsStatusRequest(comparable)) {
     return { type: 'instagram_posts_status' };
   }
 
   return null;
+}
+
+function isInstagramDraftReply({ text, status, hasPhoto = false }) {
+  if (hasPhoto) {
+    return true;
+  }
+
+  const value = normalizeText(text);
+  if (!value) {
+    return false;
+  }
+
+  if (/^(?:cancel|stop|bekor qil)$/i.test(value)) {
+    return true;
+  }
+
+  if (status === 'waiting_for_image_approval' || status === 'waiting_for_image_url') {
+    return /^(?:reject|search again|again)$/i.test(value)
+      || /^(?:approve\s+|use\s+)?[1-5]$/i.test(value)
+      || isPublicHttpUrl(value);
+  }
+
+  if (status === 'waiting_for_price') {
+    return value.length <= 100 && /\d/.test(value);
+  }
+
+  if (status === 'waiting_for_final_approval' || status === 'ready_to_publish') {
+    return /^(?:approve|post now)$/i.test(value)
+      || /^change caption\s+[\s\S]+$/i.test(value)
+      || /^schedule\s+[\s\S]+$/i.test(value);
+  }
+
+  return false;
 }
 
 function extractInstagramProductInput(text) {
@@ -172,6 +209,15 @@ function isInstagramPostsStatusRequest(text) {
   return mentionsPosts && requestsStatus;
 }
 
+function isLatestInstagramPostRequest(text) {
+  const mentionsLatest = /(?:^|\s)(?:oxirgi|so(?:'|`)nggi|latest|last)(?:\s|$)/i.test(text)
+    || /(?:^|\s)последн(?:ий|яя|ее)(?:\s|$)/i.test(text);
+  const mentionsPost = /(?:^|\s)(?:post(?:im|imiz|ni|lar)?|пост)(?:\s|$)/i.test(text);
+  const requestsAnswer = /(?:^|\s)(?:qaysi|nima|ayt|ko(?:'|`)rsat|which|what|show|tell|какой|покажи|скажи)(?:\s|$)/i.test(text)
+    || /\?$/.test(text);
+  return mentionsLatest && mentionsPost && requestsAnswer;
+}
+
 function looksLikeProductRequest(text) {
   const comparable = normalizeComparable(text);
   if (/\d|[$€£]|\b(?:usd|uzs|so(?:'|`)m|sum|сум)\b/i.test(comparable)) {
@@ -197,7 +243,17 @@ function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function isPublicHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch (error) {
+    return false;
+  }
+}
+
 module.exports = {
   extractInstagramProductInput,
+  isInstagramDraftReply,
   parseNaturalTelegramIntent,
 };

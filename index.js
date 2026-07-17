@@ -6,7 +6,10 @@ const fs = require('fs');
 const path = require('path');
 const { promisify } = require('util');
 const TelegramBot = require('node-telegram-bot-api');
-const { parseNaturalTelegramIntent } = require('./telegram-intent-router');
+const {
+  isInstagramDraftReply,
+  parseNaturalTelegramIntent,
+} = require('./telegram-intent-router');
 const {
   CONTENT_MODES,
   normalizeContentStrategyState,
@@ -308,17 +311,19 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  if (hasActiveInstagramSession(msg.chat.id)) {
-    await handleInstagramReply(msg);
-    return;
-  }
-
   if (msg.voice || msg.audio) {
     await handleAudioMeetingMessage(msg);
     return;
   }
 
   if (!msg.text) {
+    const activeDraft = getActiveInstagramDraft(msg.chat.id);
+    if (activeDraft && isInstagramDraftReply({
+      status: activeDraft.status,
+      hasPhoto: Boolean(msg.photo),
+    })) {
+      await handleInstagramReply(msg);
+    }
     return;
   }
 
@@ -330,6 +335,15 @@ bot.on('message', async (msg) => {
   const naturalIntent = parseNaturalTelegramIntent(msg.text);
   if (naturalIntent) {
     await handleNaturalLanguageIntent(msg, naturalIntent);
+    return;
+  }
+
+  const activeDraft = getActiveInstagramDraft(msg.chat.id);
+  if (activeDraft && isInstagramDraftReply({
+    status: activeDraft.status,
+    text: msg.text,
+  })) {
+    await handleInstagramReply(msg);
     return;
   }
 
@@ -352,6 +366,9 @@ async function handleNaturalLanguageIntent(msg, intent) {
       return;
     case 'content_report':
       await bot.sendMessage(msg.chat.id, formatContentStrategyReport());
+      return;
+    case 'instagram_latest_post':
+      await sendLatestInstagramPost(msg.chat.id);
       return;
     case 'instagram_posts_status':
       await sendInstagramPostStatus(msg.chat.id);
@@ -553,6 +570,15 @@ async function handleInstagramPostCommand(msg, rawInput) {
       ].join('\n')
     );
     return;
+  }
+
+  const activeDraft = getActiveInstagramDraft(msg.chat.id);
+  if (activeDraft) {
+    activeDraft.status = 'cancelled';
+    activeDraft.cancelledAt = new Date().toISOString();
+    saveInstagramDraft(activeDraft);
+    clearInstagramSession(msg.chat.id, activeDraft.id);
+    await bot.sendMessage(msg.chat.id, `Oldingi aktiv draft bekor qilindi: ${activeDraft.product?.title || activeDraft.productInput}`);
   }
 
   await withChatAction(msg.chat.id, 'typing', async () => {
@@ -941,6 +967,44 @@ async function sendInstagramPostStatus(chatId) {
       })
       .join('\n\n')
   );
+}
+
+async function sendLatestInstagramPost(chatId) {
+  const missing = getMissingInstagramPublishConfig();
+  if (missing.length > 0) {
+    await bot.sendMessage(chatId, `Instagram ma'lumoti sozlanmagan. Missing env vars: ${missing.join(', ')}`);
+    return;
+  }
+
+  await withChatAction(chatId, 'typing', async () => {
+    try {
+      await refreshInstagramInsights();
+    } catch (error) {
+      console.warn(`Latest Instagram post refresh failed, using cached data: ${redactAccessToken(error.message || String(error))}`);
+    }
+
+    const media = [...(instagramInsightsStore.latest?.media || [])]
+      .filter((item) => Number.isFinite(Date.parse(item.timestamp)))
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    const latest = media[0];
+
+    if (!latest) {
+      await bot.sendMessage(chatId, 'Instagramda chop etilgan post topilmadi.');
+      return;
+    }
+
+    const metrics = latest.metrics || {};
+    await sendLongMessage(
+      chatId,
+      [
+        'Oxirgi chop etilgan Instagram posti:',
+        instagramMediaLabel(latest),
+        `Vaqti: ${formatScheduledAt(new Date(latest.timestamp))}`,
+        `Views ${metrics.views || 0} | Reach ${metrics.reach || 0} | Interactions ${metrics.total_interactions || 0}`,
+        latest.permalink,
+      ].filter(Boolean).join('\n')
+    );
+  });
 }
 
 async function sendInstagramAnalyticsReport(chatId, days) {
