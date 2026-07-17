@@ -35,6 +35,8 @@ HERMES_API_KEY=replace_with_same_value_as_api_server_key
 HERMES_MODEL=hermes-agent
 HERMES_INSTRUCTIONS=Answer clearly and concisely.
 HERMES_TIMEOUT_MS=180000
+CONTENT_PLAN_TIMEOUT_MS=420000
+CONTENT_PLAN_CATALOG_LIMIT=30
 
 OPENAI_API_KEY=replace_with_openai_api_key
 OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe

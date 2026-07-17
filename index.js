@@ -32,6 +32,8 @@ const DEFAULT_INSTAGRAM_POST_STORE_FILE = path.join('data', 'instagram-posts.jso
 const DEFAULT_INSTAGRAM_INSIGHTS_STORE_FILE = path.join('data', 'instagram-insights.json');
 const DEFAULT_MEETING_STORE_FILE = path.join('data', 'meetings.json');
 const DEFAULT_CONTENT_STRATEGY_STORE_FILE = path.join('data', 'content-strategy.json');
+const DEFAULT_CONTENT_PLAN_TIMEOUT_MS = 420000;
+const DEFAULT_CONTENT_PLAN_CATALOG_LIMIT = 30;
 const execFileAsync = promisify(execFile);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -40,6 +42,14 @@ const hermesApiKey = process.env.HERMES_API_KEY;
 const hermesModel = process.env.HERMES_MODEL || 'hermes-agent';
 const hermesInstructions = process.env.HERMES_INSTRUCTIONS || 'Answer clearly and concisely.';
 const hermesTimeoutMs = parsePositiveInt(process.env.HERMES_TIMEOUT_MS, 180000);
+const contentPlanTimeoutMs = parsePositiveInt(
+  process.env.CONTENT_PLAN_TIMEOUT_MS,
+  Math.max(hermesTimeoutMs, DEFAULT_CONTENT_PLAN_TIMEOUT_MS)
+);
+const contentPlanCatalogLimit = parsePositiveInt(
+  process.env.CONTENT_PLAN_CATALOG_LIMIT,
+  DEFAULT_CONTENT_PLAN_CATALOG_LIMIT
+);
 const mentorProjectDir = process.env.MENTOR_PROJECT_DIR
   || path.join(process.env.HOME || process.cwd(), 'mentor');
 const allowedUserIds = parseAllowedUserIds(process.env.ALLOWED_TELEGRAM_USER_IDS);
@@ -110,6 +120,7 @@ let meetingStore = loadMeetingStore();
 let contentStrategyStore = loadContentStrategyStore();
 let recordingPollRunning = false;
 let contentStrategyRunning = false;
+const contentPlanGenerations = new Set();
 const instagramSessions = restoreInstagramSessions(instagramStore);
 const mentorSessions = new Set();
 
@@ -514,7 +525,8 @@ function denyAccess(chatId) {
 
 async function askHermes(text, chatId, options = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), hermesTimeoutMs);
+  const timeoutMs = parsePositiveInt(options.timeoutMs, hermesTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   const response = await fetch(`${hermesApiBase}/responses`, {
     method: 'POST',
@@ -1165,6 +1177,13 @@ function logInstagramInsightsError(error) {
 }
 
 async function handleContentPlanCommand(msg) {
+  const generationKey = String(msg.chat.id);
+  if (contentPlanGenerations.has(generationKey)) {
+    await bot.sendMessage(msg.chat.id, 'Content plan allaqachon tayyorlanyapti. Natijani kuting.');
+    return;
+  }
+
+  contentPlanGenerations.add(generationKey);
   try {
     await withChatAction(msg.chat.id, 'typing', async () => {
       contentStrategyStore.ownerChatId = String(msg.chat.id);
@@ -1178,13 +1197,21 @@ async function handleContentPlanCommand(msg) {
         await sendLongMessage(msg.chat.id, formatContentPlan(current));
         return;
       }
+      await bot.sendMessage(
+        msg.chat.id,
+        'Content plan tayyorlanyapti. Katalog va ochiq manbalar tekshirilgani uchun bu 3–7 daqiqa olishi mumkin.'
+      );
       const plan = await generateWeeklyContentPlan(msg.chat.id);
       await sendLongMessage(msg.chat.id, formatContentPlan(plan));
     });
   } catch (error) {
-    const message = redactAccessToken(error.message || String(error));
+    const message = error.name === 'AbortError'
+      ? `Hermes ${Math.ceil(contentPlanTimeoutMs / 60000)} daqiqalik content-plan limitida javobni tugatmadi. Qayta urinib ko‘ring.`
+      : redactAccessToken(error.message || String(error));
     console.error('Content plan generation failed:', message);
     await bot.sendMessage(msg.chat.id, `Content plan yaratilmadi: ${message}`);
+  } finally {
+    contentPlanGenerations.delete(generationKey);
   }
 }
 
@@ -1196,16 +1223,21 @@ async function generateWeeklyContentPlan(chatId) {
   }
 
   const weekKey = getNextContentWeekKey(new Date());
-  const prompt = buildContentStrategyPrompt(catalog, weekKey);
+  const promptCatalog = catalog.slice(0, contentPlanCatalogLimit);
+  const prompt = buildContentStrategyPrompt(promptCatalog, weekKey);
   const answer = await askHermes(prompt, chatId, {
     instructions: [
       'Use the installed content-strategy-agent skill.',
+      'If this conversation already contains a completed JSON plan for the same week, return it immediately without new research.',
       'Research only public competitor and global sources with web_search when available.',
+      'Use at most 4 web_search calls total. Never use web_extract, terminal, or execute_code.',
+      'When there are no approved competitors, skip competitor research.',
       'Return only valid JSON. Do not include markdown.',
       'Never invent product facts, prices, stock, metrics, or URLs.',
     ].join(' '),
     conversation: `telegram-${chatId}-content-plan-${weekKey}`,
     store: true,
+    timeoutMs: contentPlanTimeoutMs,
   });
   const parsed = parseJsonObject(answer);
   if (!parsed) {
