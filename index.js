@@ -3,7 +3,10 @@ require('dotenv').config();
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const { promisify } = require('util');
 const TelegramBot = require('node-telegram-bot-api');
 const {
@@ -122,6 +125,7 @@ let contentStrategyStore = loadContentStrategyStore();
 let recordingPollRunning = false;
 let contentStrategyRunning = false;
 const contentPlanGenerations = new Set();
+const recordingFileDeliveries = new Set();
 const instagramSessions = restoreInstagramSessions(instagramStore);
 const mentorSessions = new Set();
 
@@ -2310,7 +2314,7 @@ async function sendLatestMeetingRecording(chatId) {
         const generated = recordings
           .filter((recording) => (
             recording.state === 'FILE_GENERATED'
-            && recording.driveDestination?.exportUri
+            && (recording.driveDestination?.file || recording.driveDestination?.exportUri)
           ))
           .sort((a, b) => Date.parse(b.startTime || 0) - Date.parse(a.startTime || 0));
         const latest = generated[0];
@@ -2323,29 +2327,30 @@ async function sendLatestMeetingRecording(chatId) {
           meeting.conferenceRecords?.includes(record.name)
           || isConferenceRecordNearMeeting(record, meeting)
         ));
-        if (trackedMeeting && latest.name && !(trackedMeeting.sentRecordingNames || []).includes(latest.name)) {
+        if (trackedMeeting) {
           trackedMeeting.conferenceRecords = Array.from(new Set([
             ...(trackedMeeting.conferenceRecords || []),
             record.name,
           ]));
-          trackedMeeting.sentRecordingNames = [
-            ...(trackedMeeting.sentRecordingNames || []),
-            latest.name,
-          ];
+        }
+
+        const delivered = await sendMeetingRecordingFile(
+          chatId,
+          latest,
+          trackedMeeting?.summary || 'Google Meet recording',
+          latest.startTime || record.startTime
+        );
+        if (trackedMeeting && delivered) {
+          if (latest.name && !(trackedMeeting.sentRecordingNames || []).includes(latest.name)) {
+            trackedMeeting.sentRecordingNames = [
+              ...(trackedMeeting.sentRecordingNames || []),
+              latest.name,
+            ];
+          }
           trackedMeeting.lastCheckedAt = new Date().toISOString();
           trackedMeeting.lastError = null;
           saveMeetingStore();
         }
-
-        await bot.sendMessage(
-          chatId,
-          [
-            `Oxirgi Google Meet recording${trackedMeeting?.summary ? `: ${trackedMeeting.summary}` : ''}`,
-            `Recording: ${latest.driveDestination.exportUri}`,
-            latest.startTime || record.startTime ? `Boshlangan: ${latest.startTime || record.startTime}` : '',
-          ].filter(Boolean).join('\n'),
-          { disable_web_page_preview: true }
-        );
         return;
       }
 
@@ -2359,8 +2364,144 @@ async function sendLatestMeetingRecording(chatId) {
     });
   } catch (error) {
     console.error('Latest meeting recording lookup failed:', error.message || String(error));
-    await bot.sendMessage(chatId, 'Google Meet recordingni tekshirishda xatolik yuz berdi. Keyinroq qayta urinib ko‘ring.');
+    await bot.sendMessage(chatId, 'Google Meet recordingni topish yoki faylni Telegramga yuborishda xatolik yuz berdi. Keyinroq qayta urinib ko‘ring.');
   }
+}
+
+async function sendMeetingRecordingFile(chatId, recording, summary, startTime = '') {
+  const deliveryKey = `${chatId}:${recording.name || recording.driveDestination?.file || recording.driveDestination?.exportUri}`;
+  if (recordingFileDeliveries.has(deliveryKey)) {
+    await bot.sendMessage(chatId, 'Recording fayli allaqachon Telegramga yuklanyapti.');
+    return false;
+  }
+
+  recordingFileDeliveries.add(deliveryKey);
+  let downloaded = null;
+  try {
+    await bot.sendMessage(chatId, 'Recording topildi. Fayl Google Drive’dan yuklanib, Telegramga jo‘natilyapti...');
+    downloaded = await downloadGoogleDriveRecording(recording);
+    const sizeLabel = downloaded.size > 0 ? ` (${formatFileSize(downloaded.size)})` : '';
+    await bot.sendDocument(
+      chatId,
+      downloaded.filePath,
+      {
+        caption: [
+          summary,
+          startTime ? `Boshlangan: ${startTime}` : '',
+          `Fayl: ${downloaded.fileName}${sizeLabel}`,
+        ].filter(Boolean).join('\n'),
+      },
+      {
+        filename: downloaded.fileName,
+        contentType: downloaded.mimeType || 'video/mp4',
+      }
+    );
+    return true;
+  } finally {
+    recordingFileDeliveries.delete(deliveryKey);
+    if (downloaded) {
+      await cleanupDownloadedRecording(downloaded);
+    }
+  }
+}
+
+async function downloadGoogleDriveRecording(recording) {
+  const fileId = extractGoogleDriveFileId(recording);
+  if (!fileId) {
+    throw new Error('Google Meet recording Drive file ID topilmadi.');
+  }
+
+  const accessToken = await getGoogleAccessToken();
+  const metadataUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
+  metadataUrl.searchParams.set('fields', 'id,name,mimeType,size');
+  metadataUrl.searchParams.set('supportsAllDrives', 'true');
+  const metadata = await fetchGoogleJson(metadataUrl, accessToken, 'Google Drive files.get');
+  const fileName = sanitizeRecordingFileName(metadata.name, metadata.mimeType);
+  const temporaryDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'meet-recording-'));
+  const filePath = path.join(temporaryDirectory, fileName);
+
+  try {
+    const downloadUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
+    downloadUrl.searchParams.set('alt', 'media');
+    downloadUrl.searchParams.set('supportsAllDrives', 'true');
+    const response = await fetch(downloadUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      const bodyText = await response.text();
+      throw new Error(`Google Drive recording download HTTP ${response.status}: ${bodyText}`);
+    }
+    if (!response.body) {
+      throw new Error('Google Drive recording download bo‘sh response qaytardi.');
+    }
+
+    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+    const stat = await fs.promises.stat(filePath);
+    return {
+      filePath,
+      fileName,
+      mimeType: normalizeText(metadata.mimeType) || 'video/mp4',
+      size: Number(metadata.size || stat.size || 0),
+      temporaryDirectory,
+    };
+  } catch (error) {
+    await fs.promises.unlink(filePath).catch(() => {});
+    await fs.promises.rmdir(temporaryDirectory).catch(() => {});
+    throw error;
+  }
+}
+
+function extractGoogleDriveFileId(recording) {
+  const resourceName = normalizeText(recording.driveDestination?.file);
+  if (resourceName) {
+    return resourceName.split('/').filter(Boolean).at(-1) || '';
+  }
+
+  const exportUri = normalizeText(recording.driveDestination?.exportUri);
+  if (!exportUri) {
+    return '';
+  }
+
+  try {
+    const url = new URL(exportUri);
+    const pathMatch = url.pathname.match(/\/d\/([^/]+)/);
+    return pathMatch?.[1] || url.searchParams.get('id') || '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function sanitizeRecordingFileName(name, mimeType) {
+  let fileName = path.basename(normalizeText(name) || `google-meet-recording-${Date.now()}.mp4`)
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .slice(0, 180)
+    .trim();
+  if (!fileName) {
+    fileName = `google-meet-recording-${Date.now()}.mp4`;
+  }
+  if (!path.extname(fileName) && /^video\//i.test(normalizeText(mimeType))) {
+    fileName += '.mp4';
+  }
+  return fileName;
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) {
+    return 'unknown size';
+  }
+  if (value >= 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${Math.ceil(value / 1024)} KB`;
+}
+
+async function cleanupDownloadedRecording(downloaded) {
+  await fs.promises.unlink(downloaded.filePath).catch(() => {});
+  await fs.promises.rmdir(downloaded.temporaryDirectory).catch(() => {});
 }
 
 async function listRecentConferenceRecords() {
@@ -2427,27 +2568,28 @@ async function pollOneMeetingRecordings(meeting) {
       if (
         recording.state !== 'FILE_GENERATED'
         || !recording.name
-        || meeting.sentRecordingNames.includes(recording.name)
+        || (meeting.sentRecordingNames || []).includes(recording.name)
       ) {
         continue;
       }
 
-      const exportUri = recording.driveDestination?.exportUri;
-      if (!exportUri) {
+      if (!recording.driveDestination?.file && !recording.driveDestination?.exportUri) {
         continue;
       }
 
-      await bot.sendMessage(
+      const delivered = await sendMeetingRecordingFile(
         meeting.chatId,
-        [
-          `Meeting recording tayyor: ${meeting.summary}`,
-          `Recording: ${exportUri}`,
-          recording.startTime ? `Boshlangan: ${recording.startTime}` : '',
-        ].filter(Boolean).join('\n'),
-        { disable_web_page_preview: true }
+        recording,
+        `Meeting recording tayyor: ${meeting.summary}`,
+        recording.startTime
       );
-      meeting.sentRecordingNames.push(recording.name);
-      saveMeetingStore();
+      if (delivered) {
+        meeting.sentRecordingNames = [
+          ...(meeting.sentRecordingNames || []),
+          recording.name,
+        ];
+        saveMeetingStore();
+      }
     }
   }
 }
