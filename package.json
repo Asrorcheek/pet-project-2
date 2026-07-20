@@ -7,6 +7,7 @@
     "start": "node index.js",
     "check": "node --check index.js",
     "audit": "npm audit",
+    "telegram:migrate-local": "node scripts/migrate-telegram-to-local.js",
     "smoke:hermes": "node scripts/smoke-hermes.js",
     "test": "node scripts/test-content-strategy.js && node scripts/test-telegram-intent-router.js"
   },

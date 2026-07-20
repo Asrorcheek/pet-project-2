@@ -22,6 +22,7 @@ const {
 } = require('./content-strategy');
 
 const TELEGRAM_LIMIT = 4096;
+const DEFAULT_TELEGRAM_API_BASE = 'https://api.telegram.org';
 const DEFAULT_HERMES_API_BASE = 'http://127.0.0.1:8642/v1';
 const OPENAI_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -41,6 +42,7 @@ const DEFAULT_TELEGRAM_RECORDING_PART_BYTES = 45_000_000;
 const execFileAsync = promisify(execFile);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
+const telegramApiBase = normalizeBaseUrl(process.env.TELEGRAM_API_BASE || DEFAULT_TELEGRAM_API_BASE);
 const hermesApiBase = normalizeBaseUrl(process.env.HERMES_API_BASE || DEFAULT_HERMES_API_BASE);
 const hermesApiKey = process.env.HERMES_API_KEY;
 const hermesModel = process.env.HERMES_MODEL || 'hermes-agent';
@@ -160,7 +162,10 @@ if (missingInstagramPublishConfig.length > 0) {
   console.warn(`Instagram publishing is disabled until these env vars are set: ${missingInstagramPublishConfig.join(', ')}`);
 }
 
-const bot = new TelegramBot(token, { polling: true });
+const bot = new TelegramBot(token, {
+  polling: true,
+  baseApiUrl: telegramApiBase,
+});
 
 setTimeout(() => pollMeetingRecordings().catch(logRecordingPollError), 5000);
 setInterval(() => pollMeetingRecordings().catch(logRecordingPollError), recordingPollIntervalMs);
@@ -508,7 +513,7 @@ bot.on('polling_error', (error) => {
   console.error('Polling error:', error.message);
 });
 
-console.log(`Telegram bot started. Hermes API: ${hermesApiBase}`);
+console.log(`Telegram bot started. Telegram API: ${telegramApiBase}; Hermes API: ${hermesApiBase}`);
 setInterval(() => {
   processDueInstagramPosts().catch((error) => {
     console.error('Instagram scheduler failed:', redactAccessToken(error.message || String(error)));

@@ -1,7 +1,7 @@
 [Unit]
 Description=Telegram bot bridge to Hermes Agent
-After=network-online.target hermes-gateway.service
-Wants=network-online.target hermes-gateway.service
+After=network-online.target hermes-gateway.service telegram-bot-api.service
+Wants=network-online.target hermes-gateway.service telegram-bot-api.service
 
 [Service]
 Type=simple

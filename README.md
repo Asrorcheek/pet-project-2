@@ -29,6 +29,7 @@ Required values:
 ```env
 TELEGRAM_BOT_TOKEN=replace_with_botfather_token
 ALLOWED_TELEGRAM_USER_IDS=123456789
+TELEGRAM_API_BASE=https://api.telegram.org
 
 HERMES_API_BASE=http://127.0.0.1:8642/v1
 HERMES_API_KEY=replace_with_same_value_as_api_server_key
@@ -120,6 +121,8 @@ https://www.googleapis.com/auth/drive.meet.readonly
 ```
 
 `RECORDING_POLL_INTERVAL_SECONDS` controls polling frequency (default 300 seconds), and `RECORDING_TRACKING_DAYS` controls how long ended meetings remain eligible (default 30 days). Recordings larger than `TELEGRAM_RECORDING_PART_BYTES` (default 45,000,000 bytes) are split without re-encoding into sequential playable MP4 files before upload; this requires `ffmpeg` and `ffprobe`. Google Meet recording availability depends on the organizer's Google Workspace edition and recording must actually be started during the meeting.
+
+For a single recording file up to 2000 MB, run the official Telegram Bot API server in local mode and set `TELEGRAM_API_BASE=http://127.0.0.1:8081`. Store `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `~/.config/telegram-bot-api.env`, and set `TELEGRAM_RECORDING_PART_BYTES=1900000000` in the bot `.env`. Before moving an existing bot from the cloud API, call `logOut` once against `https://api.telegram.org`.
 
 For personal calendars, use an OAuth refresh token for the Google account that owns the calendar. `GOOGLE_CALENDAR_ID=primary` targets that account's main calendar.
 
@@ -227,10 +230,12 @@ From the cloned project directory:
 ```bash
 mkdir -p ~/.config/systemd/user
 cp deploy/hermes-gateway.service ~/.config/systemd/user/hermes-gateway.service
+cp deploy/telegram-bot-api.service ~/.config/systemd/user/telegram-bot-api.service
 cp deploy/telegram-bot.service ~/.config/systemd/user/telegram-bot.service
 
 systemctl --user daemon-reload
 systemctl --user enable --now hermes-gateway
+systemctl --user enable --now telegram-bot-api
 systemctl --user enable --now telegram-bot
 ```
 
