@@ -37,6 +37,7 @@ const DEFAULT_MEETING_STORE_FILE = path.join('data', 'meetings.json');
 const DEFAULT_CONTENT_STRATEGY_STORE_FILE = path.join('data', 'content-strategy.json');
 const DEFAULT_CONTENT_PLAN_TIMEOUT_MS = 420000;
 const DEFAULT_CONTENT_PLAN_CATALOG_LIMIT = 30;
+const DEFAULT_TELEGRAM_RECORDING_PART_BYTES = 45_000_000;
 const execFileAsync = promisify(execFile);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -76,6 +77,12 @@ const defaultEventDurationMinutes = parsePositiveInt(process.env.DEFAULT_EVENT_D
 const meetingStoreFile = process.env.MEETING_STORE_FILE || DEFAULT_MEETING_STORE_FILE;
 const recordingPollIntervalMs = parsePositiveInt(process.env.RECORDING_POLL_INTERVAL_SECONDS, 300) * 1000;
 const recordingTrackingDays = parsePositiveInt(process.env.RECORDING_TRACKING_DAYS, 30);
+const telegramRecordingPartBytes = parsePositiveInt(
+  process.env.TELEGRAM_RECORDING_PART_BYTES,
+  DEFAULT_TELEGRAM_RECORDING_PART_BYTES
+);
+const ffmpegBin = normalizeText(process.env.FFMPEG_BIN) || 'ffmpeg';
+const ffprobeBin = normalizeText(process.env.FFPROBE_BIN) || 'ffprobe';
 const metaApiVersion = normalizeMetaApiVersion(process.env.META_API_VERSION || DEFAULT_META_API_VERSION);
 const instagramGraphBase = normalizeBaseUrl(
   process.env.INSTAGRAM_GRAPH_BASE || DEFAULT_INSTAGRAM_GRAPH_BASE
@@ -2380,22 +2387,33 @@ async function sendMeetingRecordingFile(chatId, recording, summary, startTime = 
   try {
     await bot.sendMessage(chatId, 'Recording topildi. Fayl Google Drive’dan yuklanib, Telegramga jo‘natilyapti...');
     downloaded = await downloadGoogleDriveRecording(recording);
-    const sizeLabel = downloaded.size > 0 ? ` (${formatFileSize(downloaded.size)})` : '';
-    await bot.sendDocument(
-      chatId,
-      downloaded.filePath,
-      {
-        caption: [
-          summary,
-          startTime ? `Boshlangan: ${startTime}` : '',
-          `Fayl: ${downloaded.fileName}${sizeLabel}`,
-        ].filter(Boolean).join('\n'),
-      },
-      {
-        filename: downloaded.fileName,
-        contentType: downloaded.mimeType || 'video/mp4',
-      }
-    );
+    const parts = await prepareTelegramRecordingParts(downloaded);
+    if (parts.length > 1) {
+      await bot.sendMessage(
+        chatId,
+        `Recording ${formatFileSize(downloaded.size)}. Telegram hajm cheklovi sabab ${parts.length} ta MP4 qismda yuboriladi.`
+      );
+    }
+
+    for (const [index, part] of parts.entries()) {
+      const partLabel = parts.length > 1 ? `Qism: ${index + 1}/${parts.length}` : '';
+      await bot.sendDocument(
+        chatId,
+        part.filePath,
+        {
+          caption: [
+            summary,
+            partLabel,
+            startTime ? `Boshlangan: ${startTime}` : '',
+            `Fayl: ${part.fileName} (${formatFileSize(part.size)})`,
+          ].filter(Boolean).join('\n'),
+        },
+        {
+          filename: part.fileName,
+          contentType: part.mimeType || 'video/mp4',
+        }
+      );
+    }
     return true;
   } finally {
     recordingFileDeliveries.delete(deliveryKey);
@@ -2403,6 +2421,119 @@ async function sendMeetingRecordingFile(chatId, recording, summary, startTime = 
       await cleanupDownloadedRecording(downloaded);
     }
   }
+}
+
+async function prepareTelegramRecordingParts(downloaded) {
+  if (downloaded.size <= telegramRecordingPartBytes) {
+    return [{
+      filePath: downloaded.filePath,
+      fileName: downloaded.fileName,
+      mimeType: downloaded.mimeType,
+      size: downloaded.size,
+    }];
+  }
+
+  if (!/^video\//i.test(downloaded.mimeType)) {
+    throw new Error(
+      `Recording ${formatFileSize(downloaded.size)}, lekin video emas; Telegram uchun xavfsiz qismlarga ajratib bo‘lmadi.`
+    );
+  }
+
+  const durationSeconds = await getMediaDurationSeconds(downloaded.filePath);
+  let segmentSeconds = Math.max(
+    5,
+    Math.floor(durationSeconds * ((telegramRecordingPartBytes * 0.88) / downloaded.size))
+  );
+  const outputPattern = path.join(downloaded.temporaryDirectory, 'telegram-part-%03d.mp4');
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await removeRecordingParts(downloaded.temporaryDirectory);
+    await execFileAsync(
+      ffmpegBin,
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-i',
+        downloaded.filePath,
+        '-map',
+        '0:v?',
+        '-map',
+        '0:a?',
+        '-c',
+        'copy',
+        '-f',
+        'segment',
+        '-segment_time',
+        String(segmentSeconds),
+        '-reset_timestamps',
+        '1',
+        '-segment_format',
+        'mp4',
+        outputPattern,
+      ],
+      { maxBuffer: 1024 * 1024 }
+    );
+
+    const partNames = (await fs.promises.readdir(downloaded.temporaryDirectory))
+      .filter((name) => /^telegram-part-\d+\.mp4$/.test(name))
+      .sort();
+    const parts = await Promise.all(partNames.map(async (name) => {
+      const filePath = path.join(downloaded.temporaryDirectory, name);
+      const stat = await fs.promises.stat(filePath);
+      return { filePath, size: stat.size };
+    }));
+    const largestPartSize = Math.max(0, ...parts.map((part) => part.size));
+
+    if (parts.length > 0 && largestPartSize <= telegramRecordingPartBytes) {
+      const extension = '.mp4';
+      const baseName = path.basename(downloaded.fileName, path.extname(downloaded.fileName));
+      await fs.promises.unlink(downloaded.filePath).catch(() => {});
+      return parts.map((part, index) => ({
+        ...part,
+        fileName: `${baseName}-part-${String(index + 1).padStart(2, '0')}-of-${String(parts.length).padStart(2, '0')}${extension}`,
+        mimeType: 'video/mp4',
+      }));
+    }
+
+    const reductionRatio = largestPartSize > 0
+      ? Math.min(0.75, (telegramRecordingPartBytes / largestPartSize) * 0.85)
+      : 0.65;
+    segmentSeconds = Math.max(2, Math.floor(segmentSeconds * reductionRatio));
+  }
+
+  throw new Error(
+    `Recordingni ${formatFileSize(telegramRecordingPartBytes)} dan kichik MP4 qismlarga ajratib bo‘lmadi.`
+  );
+}
+
+async function getMediaDurationSeconds(filePath) {
+  const { stdout } = await execFileAsync(
+    ffprobeBin,
+    [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ],
+    { maxBuffer: 64 * 1024 }
+  );
+  const durationSeconds = Number.parseFloat(stdout.trim());
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error('Recording davomiyligini aniqlab bo‘lmadi.');
+  }
+  return durationSeconds;
+}
+
+async function removeRecordingParts(temporaryDirectory) {
+  const entries = await fs.promises.readdir(temporaryDirectory).catch(() => []);
+  await Promise.all(entries
+    .filter((name) => /^telegram-part-\d+\.mp4$/.test(name))
+    .map((name) => fs.promises.unlink(path.join(temporaryDirectory, name)).catch(() => {})));
 }
 
 async function downloadGoogleDriveRecording(recording) {
@@ -2500,7 +2631,10 @@ function formatFileSize(bytes) {
 }
 
 async function cleanupDownloadedRecording(downloaded) {
-  await fs.promises.unlink(downloaded.filePath).catch(() => {});
+  const entries = await fs.promises.readdir(downloaded.temporaryDirectory).catch(() => []);
+  await Promise.all(entries.map((name) => (
+    fs.promises.unlink(path.join(downloaded.temporaryDirectory, name)).catch(() => {})
+  )));
   await fs.promises.rmdir(downloaded.temporaryDirectory).catch(() => {});
 }
 

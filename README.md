@@ -119,7 +119,7 @@ https://www.googleapis.com/auth/meetings.space.readonly
 https://www.googleapis.com/auth/drive.meet.readonly
 ```
 
-`RECORDING_POLL_INTERVAL_SECONDS` controls polling frequency (default 300 seconds), and `RECORDING_TRACKING_DAYS` controls how long ended meetings remain eligible (default 30 days). Google Meet recording availability depends on the organizer's Google Workspace edition and recording must actually be started during the meeting.
+`RECORDING_POLL_INTERVAL_SECONDS` controls polling frequency (default 300 seconds), and `RECORDING_TRACKING_DAYS` controls how long ended meetings remain eligible (default 30 days). Recordings larger than `TELEGRAM_RECORDING_PART_BYTES` (default 45,000,000 bytes) are split without re-encoding into sequential playable MP4 files before upload; this requires `ffmpeg` and `ffprobe`. Google Meet recording availability depends on the organizer's Google Workspace edition and recording must actually be started during the meeting.
 
 For personal calendars, use an OAuth refresh token for the Google account that owns the calendar. `GOOGLE_CALENDAR_ID=primary` targets that account's main calendar.
 
