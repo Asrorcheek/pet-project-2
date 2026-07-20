@@ -42,6 +42,10 @@ function parseNaturalTelegramIntent(text) {
 
   const comparable = normalizeComparable(value);
 
+  if (isLatestMeetingRecordingRequest(comparable)) {
+    return { type: 'meeting_latest_recording' };
+  }
+
   const productInput = extractInstagramProductInput(value);
   if (productInput !== null) {
     return {
@@ -78,6 +82,14 @@ function parseNaturalTelegramIntent(text) {
   }
 
   return null;
+}
+
+function isLatestMeetingRecordingRequest(text) {
+  const mentionsMeeting = /(?:^|\s)(?:google\s*meet|meet(?:ni)?|meeting|uchrashuv|митинг|встреча)(?:\s|$)/i.test(text);
+  const mentionsRecording = /(?:^|\s)(?:record(?:ing)?(?:ni|ini)?|yozuv(?:i|ini)?|video(?:si|sini)?|запись|видео)(?:\s|$)/i.test(text);
+  const requestsResult = /(?:^|\s)(?:kerak|ber|yubor|top|ko(?:'|`)rsat|need|send|show|find|give|нужен|нужна|дай|покажи|найди)(?:\s|$)/i.test(text)
+    || /\?$/.test(text);
+  return mentionsMeeting && mentionsRecording && requestsResult;
 }
 
 function isInstagramDraftReply({ text, status, hasPhoto = false }) {

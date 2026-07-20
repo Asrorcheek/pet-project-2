@@ -42,6 +42,7 @@ const hermesApiKey = process.env.HERMES_API_KEY;
 const hermesModel = process.env.HERMES_MODEL || 'hermes-agent';
 const hermesInstructions = process.env.HERMES_INSTRUCTIONS || 'Answer clearly and concisely.';
 const hermesTimeoutMs = parsePositiveInt(process.env.HERMES_TIMEOUT_MS, 180000);
+const hermesTextConversationVersion = normalizeText(process.env.HERMES_TEXT_CONVERSATION_VERSION) || 'v2';
 const contentPlanTimeoutMs = parsePositiveInt(
   process.env.CONTENT_PLAN_TIMEOUT_MS,
   Math.max(hermesTimeoutMs, DEFAULT_CONTENT_PLAN_TIMEOUT_MS)
@@ -366,6 +367,9 @@ async function handleNaturalLanguageIntent(msg, intent) {
     case 'instagram_post':
       await handleInstagramPostCommand(msg, intent.productInput);
       return;
+    case 'meeting_latest_recording':
+      await sendLatestMeetingRecording(msg.chat.id);
+      return;
     case 'instagram_analytics':
       await sendInstagramAnalyticsReport(msg.chat.id, intent.days);
       return;
@@ -539,7 +543,7 @@ async function askHermes(text, chatId, options = {}) {
       model: hermesModel,
       input: text,
       instructions: options.instructions || hermesInstructions,
-      conversation: options.conversation || `telegram-${chatId}`,
+      conversation: options.conversation || `telegram-${chatId}-text-${hermesTextConversationVersion}`,
       store: options.store ?? true,
     }),
   }).finally(() => clearTimeout(timeout));
@@ -2288,6 +2292,94 @@ function extractMeetingCode(meetLink) {
   } catch (error) {
     return '';
   }
+}
+
+async function sendLatestMeetingRecording(chatId) {
+  try {
+    await withChatAction(chatId, 'typing', async () => {
+      assertGoogleMeetingConfig();
+      const conferenceRecords = await listRecentConferenceRecords();
+      conferenceRecords.sort((a, b) => Date.parse(b.startTime || 0) - Date.parse(a.startTime || 0));
+
+      for (const record of conferenceRecords) {
+        if (!record.name) {
+          continue;
+        }
+
+        const recordings = await listConferenceRecordings(record.name);
+        const generated = recordings
+          .filter((recording) => (
+            recording.state === 'FILE_GENERATED'
+            && recording.driveDestination?.exportUri
+          ))
+          .sort((a, b) => Date.parse(b.startTime || 0) - Date.parse(a.startTime || 0));
+        const latest = generated[0];
+
+        if (!latest) {
+          continue;
+        }
+
+        const trackedMeeting = meetingStore.meetings.find((meeting) => (
+          meeting.conferenceRecords?.includes(record.name)
+          || isConferenceRecordNearMeeting(record, meeting)
+        ));
+        if (trackedMeeting && latest.name && !(trackedMeeting.sentRecordingNames || []).includes(latest.name)) {
+          trackedMeeting.conferenceRecords = Array.from(new Set([
+            ...(trackedMeeting.conferenceRecords || []),
+            record.name,
+          ]));
+          trackedMeeting.sentRecordingNames = [
+            ...(trackedMeeting.sentRecordingNames || []),
+            latest.name,
+          ];
+          trackedMeeting.lastCheckedAt = new Date().toISOString();
+          trackedMeeting.lastError = null;
+          saveMeetingStore();
+        }
+
+        await bot.sendMessage(
+          chatId,
+          [
+            `Oxirgi Google Meet recording${trackedMeeting?.summary ? `: ${trackedMeeting.summary}` : ''}`,
+            `Recording: ${latest.driveDestination.exportUri}`,
+            latest.startTime || record.startTime ? `Boshlangan: ${latest.startTime || record.startTime}` : '',
+          ].filter(Boolean).join('\n'),
+          { disable_web_page_preview: true }
+        );
+        return;
+      }
+
+      await bot.sendMessage(
+        chatId,
+        [
+          'Google Meet recording topilmadi.',
+          'Recording faqat uchrashuvda yozib olish amalda boshlangan, tugagan va Google Drive fayli tayyor bo‘lganidan keyin chiqadi.',
+        ].join('\n')
+      );
+    });
+  } catch (error) {
+    console.error('Latest meeting recording lookup failed:', error.message || String(error));
+    await bot.sendMessage(chatId, 'Google Meet recordingni tekshirishda xatolik yuz berdi. Keyinroq qayta urinib ko‘ring.');
+  }
+}
+
+async function listRecentConferenceRecords() {
+  const accessToken = await getGoogleAccessToken();
+  const url = new URL('https://meet.googleapis.com/v2/conferenceRecords');
+  url.searchParams.set('pageSize', '100');
+  const data = await fetchGoogleJson(url, accessToken, 'Google Meet conferenceRecords.list');
+  return Array.isArray(data.conferenceRecords) ? data.conferenceRecords : [];
+}
+
+function isConferenceRecordNearMeeting(record, meeting) {
+  const actualStart = Date.parse(record.startTime);
+  const scheduledStart = Date.parse(meeting.startDateTime);
+  const scheduledEnd = Date.parse(meeting.endDateTime);
+  if (![actualStart, scheduledStart, scheduledEnd].every(Number.isFinite)) {
+    return false;
+  }
+  const margin = 12 * 60 * 60 * 1000;
+  return actualStart >= scheduledStart - margin && actualStart <= scheduledEnd + margin;
 }
 
 async function pollMeetingRecordings() {

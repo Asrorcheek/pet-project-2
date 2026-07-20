@@ -8,6 +8,14 @@ const {
 
 const cases = [
   [
+    'Oxirgi Google Meet record kerak menga',
+    { type: 'meeting_latest_recording' },
+  ],
+  [
+    'Meet recordingni yubor',
+    { type: 'meeting_latest_recording' },
+  ],
+  [
     'MacBook Air M2 8/256, $720 uchun Instagram post tayyorla',
     { type: 'instagram_post', productInput: 'MacBook Air M2 8/256, $720' },
   ],
